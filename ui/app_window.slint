@@ -1,0 +1,572 @@
+import { LineEdit } from "std-widgets.slint";
+
+// --- Morandi Colors ---
+// Background: #1F1D1B
+// Card/Surface: #2B2825
+// Border: #4E4740
+// Text Primary: #E4DDD5
+// Text Secondary: #A39A8E
+// Accent Sage Green: #7FA09B
+// Accent Gold/Yellow: #C9B087
+// Track Dark: #383430
+
+component InteractiveProgressBar {
+    in-out property <float> ratio: 0.0;
+    in-out property <float> buffer_ratio: 0.0;
+    in-out property <bool> is_scrubbing: false;
+    in-out property <bool> enabled: true;
+    callback user_scrub(float);
+    callback user_seek(float);
+
+    height: 22px;
+    min-width: 120px;
+    horizontal-stretch: 1;
+
+    track := Rectangle {
+        width: 100%;
+        y: (parent.height - self.height) / 2;
+        height: touch.has-hover || root.is_scrubbing ? 6px : 4px;
+        background: #3D3833;
+        border-radius: self.height / 2;
+        animate height { duration: 80ms; }
+
+        buffer_fill := Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width * Math.max(0.0, Math.min(1.0, root.buffer_ratio));
+            height: parent.height;
+            background: #524B44;
+            border-radius: self.height / 2;
+            animate width { duration: 100ms; }
+        }
+
+        fill := Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width * Math.max(0.0, Math.min(1.0, root.ratio));
+            height: parent.height;
+            background: touch.has-hover || root.is_scrubbing ? #92B7B1 : #7FA09B;
+            border-radius: self.height / 2;
+            animate background { duration: 80ms; }
+        }
+
+        thumb := Rectangle {
+            x: Math.max(0px, Math.min(parent.width - self.width, parent.width * Math.max(0.0, Math.min(1.0, root.ratio)) - (self.width / 2)));
+            y: (parent.height - self.height) / 2;
+            width: touch.has-hover || root.is_scrubbing ? 14px : 10px;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: #E4DDD5;
+            border-width: 1px;
+            border-color: #1F1D1B;
+            animate width { duration: 80ms; }
+        }
+    }
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.is_scrubbing = true;
+                let clamped = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
+                root.ratio = clamped;
+                root.user_scrub(clamped);
+            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                if (root.is_scrubbing) {
+                    let clamped = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
+                    root.ratio = clamped;
+                    root.is_scrubbing = false;
+                    root.user_seek(clamped);
+                }
+            }
+        }
+
+        moved => {
+            if (self.pressed) {
+                root.is_scrubbing = true;
+                let clamped = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
+                root.ratio = clamped;
+                root.user_scrub(clamped);
+            }
+        }
+    }
+}
+
+component InteractiveVolumeBar {
+    in-out property <float> volume: 1.0;
+    callback user_volume(float);
+
+    height: 20px;
+    min-width: 60px;
+
+    track := Rectangle {
+        width: 100%;
+        y: (parent.height - self.height) / 2;
+        height: 4px;
+        background: #383430;
+        border-radius: 2px;
+
+        fill := Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width * Math.max(0.0, Math.min(1.0, root.volume));
+            height: parent.height;
+            background: #7FA09B;
+            border-radius: 2px;
+        }
+
+        thumb := Rectangle {
+            x: Math.max(0px, Math.min(parent.width - self.width, parent.width * Math.max(0.0, Math.min(1.0, root.volume)) - (self.width / 2)));
+            y: (parent.height - self.height) / 2;
+            width: touch.has-hover ? 12px : 8px;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: #E4DDD5;
+            animate width { duration: 80ms; }
+        }
+    }
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+
+        moved => {
+            if (self.pressed) {
+                let clamped = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
+                root.volume = clamped;
+                root.user_volume(clamped);
+            }
+        }
+
+        clicked => {
+            let clamped = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
+            root.volume = clamped;
+            root.user_volume(clamped);
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "YouTube Audio Player";
+    preferred-width: 720px;
+    preferred-height: 160px;
+    min-width: 660px;
+    min-height: 150px;
+    background: #1F1D1B;
+    default-font-family: "Segoe UI, sans-serif";
+
+    // --- State Properties (Decoupled Visual State) ---
+    in-out property <string> track_title: "Ready to Play";
+    in-out property <string> track_artist: "Enter a search query, playlist, or YouTube URL";
+    in-out property <string> time_display: "00:00 / 00:00";
+    in-out property <string> track_status: "READY";
+    in-out property <string> track_badge: "OPUS 160K";
+    in-out property <bool> is_playing: false;
+    in-out property <bool> is_loading: false;
+    in-out property <image> cover_image;
+    in-out property <bool> has_cover: false;
+
+    // Visual Progress: Normalized 0.0 to 1.0 (Timer purely updates this)
+    in-out property <float> progress_ratio: 0.0;
+    in-out property <float> buffer_ratio: 0.0;
+    in-out property <bool> is_scrubbing: false;
+    in-out property <bool> has_active_track: false;
+
+    // Visual Volume: Normalized 0.0 to 1.0
+    in-out property <float> volume_ratio: 1.0;
+
+    // --- Callbacks (User Intent Only, Never triggered by Timer) ---
+    callback search_and_play(string);
+    callback toggle_play_pause();
+    callback play_previous();
+    callback play_next();
+    callback stop();
+    callback on_user_scrub(float);
+    callback on_user_seek(float);
+    callback on_user_volume(float);
+
+    Rectangle {
+        background: #1F1D1B;
+
+        HorizontalLayout {
+            padding: 14px;
+            spacing: 14px;
+
+            // ================= 1. LEFT: COVER ART =================
+            Rectangle {
+                width: 105px;
+                height: 105px;
+                background: #2B2825;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: #4E4740;
+                clip: true;
+
+                if root.has_cover: Image {
+                    source: root.cover_image;
+                    image-fit: cover;
+                    width: 100%;
+                    height: 100%;
+                }
+
+                // Default Cover: Musical Note Vector
+                if !root.has_cover: Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    background: #262321;
+
+                    Path {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: 44px;
+                        height: 44px;
+                        fill: #7FA09B;
+                        commands: "M 10 34 A 5 4 0 1 1 15 30 L 15 10 L 33 6 L 33 26 A 5 4 0 1 1 38 22 L 38 3 L 12 7 L 12 30 A 5 4 0 0 1 10 34 Z";
+                    }
+                }
+            }
+
+            // ================= 2. CENTER: INFO & PROGRESS =================
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 8px;
+                alignment: space-between;
+
+                // --- Top Search Bar with Equal-Size (34x34) Search Button ---
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    search_input := LineEdit {
+                        placeholder-text: "Search song, playlist, or paste YouTube link...";
+                        font-size: 12px;
+                        horizontal-stretch: 1;
+                        accepted => {
+                            if (self.text != "") {
+                                root.search_and_play(self.text);
+                            }
+                        }
+                    }
+
+                    // Equal Size (34x34) Search Button (Magnifying Glass Icon)
+                    search_btn := Rectangle {
+                        width: 34px;
+                        height: 34px;
+                        background: search_touch.has-hover ? #8EAEA9 : #7FA09B;
+                        border-radius: 4px;
+                        animate background { duration: 100ms; }
+
+                        // Centered Magnifying glass vector
+                        Path {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 16px;
+                            height: 16px;
+                            stroke: #1F1D1B;
+                            stroke-width: 2px;
+                            commands: "M 6.5 2 A 4.5 4.5 0 1 0 11 6.5 A 4.5 4.5 0 0 0 6.5 2 Z M 10 10 L 14.5 14.5";
+                        }
+
+                        search_touch := TouchArea {
+                            enabled: !root.is_loading && search_input.text != "";
+                            clicked => {
+                                if (search_input.text != "") {
+                                    root.search_and_play(search_input.text);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // --- Track Metadata Row ---
+                VerticalLayout {
+                    spacing: 2px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+
+                        Text {
+                            text: root.track_title;
+                            font-size: 15px;
+                            font-weight: 700;
+                            color: #E4DDD5;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+
+                        // Codec / Format Badge
+                        Rectangle {
+                            background: #2B2825;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #4E4740;
+
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 6px;
+                                padding-top: 2px;
+                                padding-bottom: 2px;
+
+                                Text {
+                                    text: root.track_badge;
+                                    font-size: 10px;
+                                    font-weight: 600;
+                                    color: #7FA09B;
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            text: root.track_artist;
+                            font-size: 12px;
+                            color: #A39A8E;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+
+                        Text {
+                            text: root.track_status;
+                            font-size: 11px;
+                            font-weight: 600;
+                            color: root.is_loading ? #C9B087 : (root.is_playing ? #7FA09B : #5E564F);
+                        }
+                    }
+                }
+
+                // --- Decoupled Interactive Progress Bar ---
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    InteractiveProgressBar {
+                        horizontal-stretch: 1;
+                        ratio <=> root.progress_ratio;
+                        buffer_ratio <=> root.buffer_ratio;
+                        is_scrubbing <=> root.is_scrubbing;
+                        enabled: root.has_active_track;
+                        user_scrub(r) => {
+                            root.on_user_scrub(r);
+                        }
+                        user_seek(r) => {
+                            root.on_user_seek(r);
+                        }
+                    }
+
+                    Text {
+                        text: root.time_display;
+                        font-size: 11px;
+                        color: #A39A8E;
+                        min-width: 85px;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // ================= 3. RIGHT: EQUAL-SIZE ACTION BUTTONS & VOLUME =================
+            VerticalLayout {
+                width: 175px;
+                spacing: 8px;
+                alignment: space-between;
+
+                // --- Playback Controls: Prev, Play/Pause, Next, Stop ---
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: center;
+
+                    // Previous Button (34x34 Square)
+                    prev_btn := Rectangle {
+                        width: 34px;
+                        height: 34px;
+                        background: prev_touch.has-hover ? #383430 : #2B2825;
+                        border-width: 1px;
+                        border-color: #4E4740;
+                        border-radius: 4px;
+                        animate background { duration: 100ms; }
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            padding-top: 11px;
+                            padding-bottom: 11px;
+
+                            Rectangle {
+                                width: 3px;
+                                height: 12px;
+                                background: #E4DDD5;
+                                border-radius: 1px;
+                            }
+
+                            Path {
+                                width: 9px;
+                                height: 12px;
+                                fill: #E4DDD5;
+                                commands: "M 9 0 L 0 6 L 9 12 Z";
+                            }
+                        }
+
+                        prev_touch := TouchArea {
+                            enabled: !root.is_loading;
+                            clicked => {
+                                root.play_previous();
+                            }
+                        }
+                    }
+
+                    // Play / Pause Button (34x34 Square)
+                    play_btn := Rectangle {
+                        width: 34px;
+                        height: 34px;
+                        background: play_touch.has-hover ? #8EAEA9 : #7FA09B;
+                        border-radius: 4px;
+                        animate background { duration: 100ms; }
+
+                        // Triangle (Play)
+                        if !root.is_playing: Path {
+                            x: (parent.width - self.width) / 2 + 1px;
+                            y: (parent.height - self.height) / 2;
+                            width: 14px;
+                            height: 14px;
+                            fill: #1F1D1B;
+                            commands: "M 2 1 L 13 7 L 2 13 Z";
+                        }
+
+                        // Double vertical bars (Pause)
+                        if root.is_playing: HorizontalLayout {
+                            alignment: center;
+                            spacing: 4px;
+                            padding-top: 10px;
+                            padding-bottom: 10px;
+
+                            Rectangle {
+                                width: 4px;
+                                height: 14px;
+                                background: #1F1D1B;
+                                border-radius: 1px;
+                            }
+                            Rectangle {
+                                width: 4px;
+                                height: 14px;
+                                background: #1F1D1B;
+                                border-radius: 1px;
+                            }
+                        }
+
+                        play_touch := TouchArea {
+                            enabled: !root.is_loading;
+                            clicked => {
+                                root.toggle_play_pause();
+                            }
+                        }
+                    }
+
+                    // Next Button (34x34 Square)
+                    next_btn := Rectangle {
+                        width: 34px;
+                        height: 34px;
+                        background: next_touch.has-hover ? #383430 : #2B2825;
+                        border-width: 1px;
+                        border-color: #4E4740;
+                        border-radius: 4px;
+                        animate background { duration: 100ms; }
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            padding-top: 11px;
+                            padding-bottom: 11px;
+
+                            Path {
+                                width: 9px;
+                                height: 12px;
+                                fill: #E4DDD5;
+                                commands: "M 0 0 L 9 6 L 0 12 Z";
+                            }
+
+                            Rectangle {
+                                width: 3px;
+                                height: 12px;
+                                background: #E4DDD5;
+                                border-radius: 1px;
+                            }
+                        }
+
+                        next_touch := TouchArea {
+                            enabled: !root.is_loading;
+                            clicked => {
+                                root.play_next();
+                            }
+                        }
+                    }
+
+                    // Stop Button (34x34 Square)
+                    stop_btn := Rectangle {
+                        width: 34px;
+                        height: 34px;
+                        background: stop_touch.has-hover ? #383430 : #2B2825;
+                        border-width: 1px;
+                        border-color: #4E4740;
+                        border-radius: 4px;
+                        animate background { duration: 100ms; }
+
+                        // Square (Stop)
+                        Rectangle {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 12px;
+                            height: 12px;
+                            background: #E4DDD5;
+                            border-radius: 2px;
+                        }
+
+                        stop_touch := TouchArea {
+                            clicked => {
+                                root.stop();
+                            }
+                        }
+                    }
+                }
+
+                // Volume row: Clean, non-collapsing layout within 145px
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: center;
+
+                    Text {
+                        text: "VOL";
+                        font-size: 10px;
+                        font-weight: 700;
+                        color: #A39A8E;
+                        vertical-alignment: center;
+                        min-width: 24px;
+                    }
+
+                    InteractiveVolumeBar {
+                        horizontal-stretch: 1;
+                        volume <=> root.volume_ratio;
+                        user_volume(v) => {
+                            root.on_user_volume(v);
+                        }
+                    }
+
+                    Text {
+                        text: Math.round(root.volume_ratio * 100.0) + "%";
+                        font-size: 10px;
+                        color: #A39A8E;
+                        min-width: 30px;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
