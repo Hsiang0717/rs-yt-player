@@ -1,10 +1,10 @@
 use anyhow::Result;
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
-use windows::core::w;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
+use windows::core::w;
 
 pub struct SmtcManager {
     controls: MediaControls,
@@ -69,7 +69,11 @@ impl SmtcManager {
         let controls = MediaControls::new(config)
             .map_err(|e| anyhow::anyhow!("Failed to initialize Windows SMTC: {:?}", e))?;
 
-        Ok(Self { controls, hwnd, owns_hwnd })
+        Ok(Self {
+            controls,
+            hwnd,
+            owns_hwnd,
+        })
     }
 
     pub fn attach<F>(&mut self, handler: F) -> Result<()>
@@ -82,7 +86,12 @@ impl SmtcManager {
         Ok(())
     }
 
-    pub fn set_metadata(&mut self, title: &str, artist: &str, duration: Option<std::time::Duration>) {
+    pub fn set_metadata(
+        &mut self,
+        title: &str,
+        artist: &str,
+        duration: Option<std::time::Duration>,
+    ) {
         let meta = MediaMetadata {
             title: Some(title),
             album: Some("YouTube Pure Audio"),

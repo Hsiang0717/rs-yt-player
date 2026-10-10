@@ -7,6 +7,17 @@ fn main() {
         res.set("ProductName", "YouTube Audio Player");
         res.set("OriginalFilename", "YouTubeAudioPlayer.exe");
         res.set("LegalCopyright", "Copyright (C) 2026");
+        // Keep the physical window size fixed when it moves between monitors.
+        res.set_manifest(r#"
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">System</dpiAwareness>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
+    </windowsSettings>
+  </application>
+</assembly>
+"#);
         let _ = res.compile();
     }
 }

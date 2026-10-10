@@ -1,6 +1,6 @@
-use anyhow::Result;
 use crate::extractor::Extractor;
 use crate::player::AudioPlayer;
+use anyhow::Result;
 use tracing::error;
 
 /// Fallback / Headless CLI mode for automated tests, scripts, and terminal usage
@@ -13,11 +13,16 @@ pub async fn run_cli_mode(raw_args: Vec<String>, is_smoke_test: bool) -> Result<
                 if let Ok(mgr) = op.get() {
                     if let Ok(s) = mgr.GetCurrentSession() {
                         if let Ok(app_id) = s.SourceAppUserModelId() {
-                            println!("Current Active SMTC Session SourceAppUserModelId: {}", app_id);
+                            println!(
+                                "Current Active SMTC Session SourceAppUserModelId: {}",
+                                app_id
+                            );
                             if let Ok(info_op) = s.TryGetMediaPropertiesAsync() {
                                 if let Ok(props) = info_op.get() {
-                                    let title = props.Title().map(|t| t.to_string()).unwrap_or_default();
-                                    let artist = props.Artist().map(|a| a.to_string()).unwrap_or_default();
+                                    let title =
+                                        props.Title().map(|t| t.to_string()).unwrap_or_default();
+                                    let artist =
+                                        props.Artist().map(|a| a.to_string()).unwrap_or_default();
                                     println!(" -> Title: '{}', Artist: '{}'", title, artist);
                                 }
                             }
@@ -59,22 +64,39 @@ pub async fn run_cli_mode(raw_args: Vec<String>, is_smoke_test: bool) -> Result<
 
     println!("\n------------------ Stream Metadata ------------------");
     println!("Title:    {}", meta.title);
-    println!("Uploader: {}", meta.uploader.as_deref().unwrap_or("Unknown"));
+    println!(
+        "Uploader: {}",
+        meta.uploader.as_deref().unwrap_or("Unknown")
+    );
     println!("Duration: {}", duration_str);
-    println!("Codec:    {}", meta.audio_codec.as_deref().unwrap_or("Unknown"));
-    println!("Stream:   {}...", &meta.stream_url[..meta.stream_url.len().min(80)]);
+    println!(
+        "Codec:    {}",
+        meta.audio_codec.as_deref().unwrap_or("Unknown")
+    );
+    println!(
+        "Stream:   {}...",
+        &meta.stream_url[..meta.stream_url.len().min(80)]
+    );
     println!("-----------------------------------------------------\n");
 
     println!("Initializing audio engine (WASAPI)...");
-    let (_stream, stream_handle) = rodio::OutputStream::try_default()
-        .map_err(|e| anyhow::anyhow!("Failed to open default Windows audio output device: {}", e))?;
-    let player = AudioPlayer::new(&stream_handle)?;
+    let (_stream, stream_handle) = rodio::OutputStream::try_default().map_err(|e| {
+        anyhow::anyhow!("Failed to open default Windows audio output device: {}", e)
+    })?;
+    let player = AudioPlayer::new(&stream_handle, extractor.yt_dlp_path().to_path_buf())?;
 
-    println!("Streaming audio on-demand via ffmpeg PCM pipe...");
+    println!("Streaming AAC audio through the built-in decoder...");
     let player_clone = player.clone();
     let stream_url = meta.stream_url.clone();
+    let request_headers = meta.http_headers.clone();
+    let start_offset_secs = meta.start_offset_secs;
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = player_clone.play_stream(&stream_url, duration_secs) {
+        if let Err(e) = player_clone.play_stream_from_with_headers(
+            &stream_url,
+            request_headers,
+            start_offset_secs,
+            duration_secs,
+        ) {
             error!("Audio playback error: {:#}", e);
         }
     });
@@ -108,12 +130,20 @@ pub async fn run_cli_mode(raw_args: Vec<String>, is_smoke_test: bool) -> Result<
                 if let Ok(mgr) = op.get() {
                     if let Ok(s) = mgr.GetCurrentSession() {
                         if let Ok(app_id) = s.SourceAppUserModelId() {
-                            println!("Empirical SMTC Verification: Active Session SourceAppUserModelId: {}", app_id);
+                            println!(
+                                "Empirical SMTC Verification: Active Session SourceAppUserModelId: {}",
+                                app_id
+                            );
                             if let Ok(info_op) = s.TryGetMediaPropertiesAsync() {
                                 if let Ok(props) = info_op.get() {
-                                    let title = props.Title().map(|t| t.to_string()).unwrap_or_default();
-                                    let artist = props.Artist().map(|a| a.to_string()).unwrap_or_default();
-                                    println!("Empirical SMTC Verification: Title='{}', Artist='{}'", title, artist);
+                                    let title =
+                                        props.Title().map(|t| t.to_string()).unwrap_or_default();
+                                    let artist =
+                                        props.Artist().map(|a| a.to_string()).unwrap_or_default();
+                                    println!(
+                                        "Empirical SMTC Verification: Title='{}', Artist='{}'",
+                                        title, artist
+                                    );
                                 }
                             }
                         }
@@ -138,9 +168,17 @@ pub async fn run_cli_mode(raw_args: Vec<String>, is_smoke_test: bool) -> Result<
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         println!("Smoke test: Testing seek to 30s...");
-        let _ = player.seek_to(30.0);
+        let player_seek = player.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = player_seek.seek_to(30.0);
+        })
+        .await?;
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        player.stop();
+        let player_stop = player.clone();
+        tokio::task::spawn_blocking(move || {
+            player_stop.stop();
+        })
+        .await?;
         #[cfg(target_os = "windows")]
         if let Some(s) = &mut smtc {
             s.set_playback(false);

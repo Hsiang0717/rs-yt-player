@@ -25,10 +25,14 @@ impl SystemTray {
         let play_pause_id = play_pause_item.id().clone();
         let quit_id = quit_item.id().clone();
 
-        menu.append(&show_item).context("Failed to append show_item")?;
-        menu.append(&play_pause_item).context("Failed to append play_pause_item")?;
-        menu.append(&separator).context("Failed to append separator")?;
-        menu.append(&quit_item).context("Failed to append quit_item")?;
+        menu.append(&show_item)
+            .context("Failed to append show_item")?;
+        menu.append(&play_pause_item)
+            .context("Failed to append play_pause_item")?;
+        menu.append(&separator)
+            .context("Failed to append separator")?;
+        menu.append(&quit_item)
+            .context("Failed to append quit_item")?;
 
         // 3. Construct tray icon
         let tray_icon = TrayIconBuilder::new()
@@ -62,7 +66,7 @@ fn create_tray_icon(width: u32, height: u32) -> Result<Icon> {
 
             if dist <= radius {
                 // Vibrant Indigo (#6366f1)
-                rgba.push(99);  // R
+                rgba.push(99); // R
                 rgba.push(102); // G
                 rgba.push(241); // B
                 rgba.push(255); // Alpha

@@ -1,4 +1,14 @@
-import { LineEdit } from "std-widgets.slint";
+import { LineEdit, ListView } from "std-widgets.slint";
+
+export struct TrackRow {
+    key: string,
+    title: string,
+    artist: string,
+    duration: string,
+    cover: image,
+    is_current: bool,
+    is_favorite: bool,
+}
 
 // --- Morandi Colors ---
 // Background: #1F1D1B
@@ -151,12 +161,55 @@ component InteractiveVolumeBar {
     }
 }
 
+component LoadingSpinner {
+    in property <bool> loading: false;
+    width: 14px;
+    height: 14px;
+
+    property <float> pulse: 0.0;
+
+    animate pulse {
+        duration: 900ms;
+        iteration-count: -1;
+        easing: ease-in-out;
+    }
+
+    states [
+        active when root.loading: {
+            pulse: 1.0;
+        }
+        inactive when !root.loading: {
+            pulse: 0.0;
+        }
+    ]
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 7px;
+        border-width: 2px;
+        border-color: #C9B087;
+        opacity: 0.3 + 0.7 * root.pulse;
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 6px + 4px * root.pulse;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: #C9B087;
+        opacity: 0.5 + 0.5 * root.pulse;
+    }
+}
+
 export component AppWindow inherits Window {
     title: "YouTube Audio Player";
-    preferred-width: 720px;
-    preferred-height: 160px;
-    min-width: 660px;
-    min-height: 150px;
+    preferred-width: 540px;
+    preferred-height: root.queue_expanded ? 310px : 130px;
+    min-width: 500px;
+    min-height: root.queue_expanded ? 310px : 130px;
+    max-height: root.queue_expanded ? 310px : 130px;
     background: #1F1D1B;
     default-font-family: "Segoe UI, sans-serif";
 
@@ -165,7 +218,7 @@ export component AppWindow inherits Window {
     in-out property <string> track_artist: "Enter a search query, playlist, or YouTube URL";
     in-out property <string> time_display: "00:00 / 00:00";
     in-out property <string> track_status: "READY";
-    in-out property <string> track_badge: "OPUS 160K";
+    in-out property <string> track_badge: "AAC";
     in-out property <bool> is_playing: false;
     in-out property <bool> is_loading: false;
     in-out property <image> cover_image;
@@ -179,9 +232,40 @@ export component AppWindow inherits Window {
 
     // Visual Volume: Normalized 0.0 to 1.0
     in-out property <float> volume_ratio: 1.0;
+    in-out property <bool> is_muted: false;
+    in-out property <bool> queue_expanded: true;
+    in-out property <string> panel_tab: "QUEUE";
+    in-out property <string> panel_message: "";
+    in-out property <[TrackRow]> search_results: [];
+    in-out property <[TrackRow]> queue_items: [];
+    in-out property <[TrackRow]> favorite_items: [];
+    in-out property <[TrackRow]> history_items: [];
+    in-out property <bool> shuffle_enabled: false;
+    in-out property <string> repeat_mode_label: "REPEAT OFF";
+    in-out property <bool> can_retry: false;
+    in-out property <string> current_track_key: "";
+    in-out property <bool> current_is_favorite: false;
 
     // --- Callbacks (User Intent Only, Never triggered by Timer) ---
     callback search_and_play(string);
+    callback cancel_loading();
+    callback select_panel_tab(string);
+    callback play_search_result(string);
+    callback enqueue_search_result(string);
+    callback toggle_search_favorite(string);
+    callback play_queue_item(int);
+    callback remove_queue_item(int);
+    callback move_queue_item_up(int);
+    callback move_queue_item_down(int);
+    callback clear_queue();
+    callback play_favorite(string);
+    callback remove_favorite(string);
+    callback play_history(string);
+    callback favorite_history(string);
+    callback cycle_repeat_mode();
+    callback toggle_shuffle();
+    callback retry_playback();
+    callback toggle_current_favorite();
     callback toggle_play_pause();
     callback play_previous();
     callback play_next();
@@ -189,20 +273,31 @@ export component AppWindow inherits Window {
     callback on_user_scrub(float);
     callback on_user_seek(float);
     callback on_user_volume(float);
+    callback toggle_mute();
+    callback toggle_queue();
 
     Rectangle {
+        width: 100%;
+        height: 100%;
         background: #1F1D1B;
 
         HorizontalLayout {
-            padding: 14px;
-            spacing: 14px;
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 130px;
+            padding-left: 10px;
+            padding-right: 10px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            spacing: 10px;
 
             // ================= 1. LEFT: COVER ART =================
             Rectangle {
-                width: 105px;
-                height: 105px;
+                width: 90px;
+                height: 90px;
                 background: #2B2825;
-                border-radius: 8px;
+                border-radius: 6px;
                 border-width: 1px;
                 border-color: #4E4740;
                 clip: true;
@@ -223,8 +318,8 @@ export component AppWindow inherits Window {
                     Path {
                         x: (parent.width - self.width) / 2;
                         y: (parent.height - self.height) / 2;
-                        width: 44px;
-                        height: 44px;
+                        width: 36px;
+                        height: 36px;
                         fill: #7FA09B;
                         commands: "M 10 34 A 5 4 0 1 1 15 30 L 15 10 L 33 6 L 33 26 A 5 4 0 1 1 38 22 L 38 3 L 12 7 L 12 30 A 5 4 0 0 1 10 34 Z";
                     }
@@ -234,16 +329,16 @@ export component AppWindow inherits Window {
             // ================= 2. CENTER: INFO & PROGRESS =================
             VerticalLayout {
                 horizontal-stretch: 1;
-                spacing: 8px;
+                spacing: 5px;
                 alignment: space-between;
 
-                // --- Top Search Bar with Equal-Size (34x34) Search Button ---
+                // --- Top Search Bar ---
                 HorizontalLayout {
-                    spacing: 8px;
+                    spacing: 6px;
 
                     search_input := LineEdit {
                         placeholder-text: "Search song, playlist, or paste YouTube link...";
-                        font-size: 12px;
+                        font-size: 11px;
                         horizontal-stretch: 1;
                         accepted => {
                             if (self.text != "") {
@@ -252,20 +347,19 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // Equal Size (34x34) Search Button (Magnifying Glass Icon)
+                    // Search Button
                     search_btn := Rectangle {
-                        width: 34px;
-                        height: 34px;
+                        width: 30px;
+                        height: 30px;
                         background: search_touch.has-hover ? #8EAEA9 : #7FA09B;
                         border-radius: 4px;
                         animate background { duration: 100ms; }
 
-                        // Centered Magnifying glass vector
                         Path {
                             x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
-                            width: 16px;
-                            height: 16px;
+                            width: 14px;
+                            height: 14px;
                             stroke: #1F1D1B;
                             stroke-width: 2px;
                             commands: "M 6.5 2 A 4.5 4.5 0 1 0 11 6.5 A 4.5 4.5 0 0 0 6.5 2 Z M 10 10 L 14.5 14.5";
@@ -273,11 +367,37 @@ export component AppWindow inherits Window {
 
                         search_touch := TouchArea {
                             enabled: !root.is_loading && search_input.text != "";
+                            mouse-cursor: pointer;
                             clicked => {
                                 if (search_input.text != "") {
                                     root.search_and_play(search_input.text);
                                 }
                             }
+                        }
+                    }
+
+                    queue_btn := Rectangle {
+                        width: 62px;
+                        height: 30px;
+                        background: queue_touch.has-hover ? #383430 : #2B2825;
+                        border-width: 1px;
+                        border-color: #4E4740;
+                        border-radius: 4px;
+
+                        Text {
+                            text: root.queue_expanded ? "LIST ▲" : "LIST ▼";
+                            color: #E4DDD5;
+                            font-size: 9px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: 100%;
+                            height: 100%;
+                        }
+
+                        queue_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle_queue(); }
                         }
                     }
                 }
@@ -287,12 +407,12 @@ export component AppWindow inherits Window {
                     spacing: 2px;
 
                     HorizontalLayout {
-                        spacing: 8px;
+                        spacing: 6px;
                         alignment: start;
 
                         Text {
                             text: root.track_title;
-                            font-size: 15px;
+                            font-size: 13px;
                             font-weight: 700;
                             color: #E4DDD5;
                             overflow: elide;
@@ -302,49 +422,115 @@ export component AppWindow inherits Window {
                         // Codec / Format Badge
                         Rectangle {
                             background: #2B2825;
-                            border-radius: 4px;
+                            border-radius: 3px;
                             border-width: 1px;
                             border-color: #4E4740;
 
                             HorizontalLayout {
-                                padding-left: 6px;
-                                padding-right: 6px;
-                                padding-top: 2px;
-                                padding-bottom: 2px;
+                                padding-left: 5px;
+                                padding-right: 5px;
+                                padding-top: 1px;
+                                padding-bottom: 1px;
 
                                 Text {
                                     text: root.track_badge;
-                                    font-size: 10px;
+                                    font-size: 9px;
                                     font-weight: 600;
                                     color: #7FA09B;
                                 }
                             }
                         }
+
+                        if root.current_track_key != "": Rectangle {
+                            width: 22px;
+                            height: 22px;
+                            background: favorite_touch.has-hover ? #3D3833 : #2B2825;
+                            border-radius: 3px;
+                            Text {
+                                text: root.current_is_favorite ? "♥" : "♡";
+                                color: root.current_is_favorite ? #C9B087 : #A39A8E;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                width: 100%;
+                                height: 100%;
+                            }
+                            favorite_touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.toggle_current_favorite(); }
+                            }
+                        }
                     }
 
                     HorizontalLayout {
-                        spacing: 8px;
+                        spacing: 6px;
 
                         Text {
                             text: root.track_artist;
-                            font-size: 12px;
+                            font-size: 11px;
                             color: #A39A8E;
                             overflow: elide;
                             horizontal-stretch: 1;
                         }
 
+                        if root.is_loading: LoadingSpinner {
+                            loading: root.is_loading;
+                        }
+
                         Text {
                             text: root.track_status;
-                            font-size: 11px;
+                            font-size: 10px;
                             font-weight: 600;
-                            color: root.is_loading ? #C9B087 : (root.is_playing ? #7FA09B : #5E564F);
+                            color: root.track_status == "ERROR" ? #D18D78 : (root.is_loading || root.track_status == "BUFFERING" || root.track_status == "SEARCHING" ? #C9B087 : (root.is_playing ? #7FA09B : #5E564F));
+                        }
+
+                        if root.is_loading: Rectangle {
+                            width: 44px;
+                            height: 18px;
+                            background: cancel_touch.has-hover ? #E09E8A : #D18D78;
+                            border-radius: 3px;
+                            Text {
+                                text: "CANCEL";
+                                color: #1F1D1B;
+                                font-size: 8px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                width: 100%;
+                                height: 100%;
+                            }
+                            cancel_touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.cancel_loading(); }
+                            }
+                        }
+
+                        if root.can_retry: Rectangle {
+                            width: 38px;
+                            height: 18px;
+                            background: retry_touch.has-hover ? #8EAEA9 : #7FA09B;
+                            border-radius: 3px;
+                            Text {
+                                text: "RETRY";
+                                color: #1F1D1B;
+                                font-size: 8px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                width: 100%;
+                                height: 100%;
+                            }
+                            retry_touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.retry_playback(); }
+                            }
                         }
                     }
                 }
 
                 // --- Decoupled Interactive Progress Bar ---
                 HorizontalLayout {
-                    spacing: 8px;
+                    spacing: 6px;
 
                     InteractiveProgressBar {
                         horizontal-stretch: 1;
@@ -362,9 +548,9 @@ export component AppWindow inherits Window {
 
                     Text {
                         text: root.time_display;
-                        font-size: 11px;
+                        font-size: 10px;
                         color: #A39A8E;
-                        min-width: 85px;
+                        min-width: 72px;
                         horizontal-alignment: right;
                         vertical-alignment: center;
                     }
@@ -373,19 +559,19 @@ export component AppWindow inherits Window {
 
             // ================= 3. RIGHT: EQUAL-SIZE ACTION BUTTONS & VOLUME =================
             VerticalLayout {
-                width: 175px;
-                spacing: 8px;
+                width: 155px;
+                spacing: 6px;
                 alignment: space-between;
 
                 // --- Playback Controls: Prev, Play/Pause, Next, Stop ---
                 HorizontalLayout {
-                    spacing: 8px;
+                    spacing: 5px;
                     alignment: center;
 
-                    // Previous Button (34x34 Square)
+                    // Previous Button
                     prev_btn := Rectangle {
-                        width: 34px;
-                        height: 34px;
+                        width: 28px;
+                        height: 28px;
                         background: prev_touch.has-hover ? #383430 : #2B2825;
                         border-width: 1px;
                         border-color: #4E4740;
@@ -395,83 +581,81 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             alignment: center;
                             spacing: 2px;
-                            padding-top: 11px;
-                            padding-bottom: 11px;
+                            padding-top: 8px;
+                            padding-bottom: 8px;
 
                             Rectangle {
-                                width: 3px;
-                                height: 12px;
+                                width: 2px;
+                                height: 10px;
                                 background: #E4DDD5;
                                 border-radius: 1px;
                             }
 
                             Path {
-                                width: 9px;
-                                height: 12px;
+                                width: 8px;
+                                height: 10px;
                                 fill: #E4DDD5;
-                                commands: "M 9 0 L 0 6 L 9 12 Z";
+                                commands: "M 8 0 L 0 5 L 8 10 Z";
                             }
                         }
 
                         prev_touch := TouchArea {
-                            enabled: !root.is_loading;
+                            mouse-cursor: pointer;
                             clicked => {
                                 root.play_previous();
                             }
                         }
                     }
 
-                    // Play / Pause Button (34x34 Square)
+                    // Play / Pause Button (Prominent 38x38 button)
                     play_btn := Rectangle {
-                        width: 34px;
-                        height: 34px;
+                        width: 38px;
+                        height: 38px;
                         background: play_touch.has-hover ? #8EAEA9 : #7FA09B;
-                        border-radius: 4px;
+                        border-radius: 6px;
                         animate background { duration: 100ms; }
 
-                        // Triangle (Play)
                         if !root.is_playing: Path {
                             x: (parent.width - self.width) / 2 + 1px;
                             y: (parent.height - self.height) / 2;
-                            width: 14px;
-                            height: 14px;
+                            width: 16px;
+                            height: 16px;
                             fill: #1F1D1B;
-                            commands: "M 2 1 L 13 7 L 2 13 Z";
+                            commands: "M 2 1 L 15 8 L 2 15 Z";
                         }
 
-                        // Double vertical bars (Pause)
                         if root.is_playing: HorizontalLayout {
                             alignment: center;
                             spacing: 4px;
-                            padding-top: 10px;
-                            padding-bottom: 10px;
+                            padding-top: 11px;
+                            padding-bottom: 11px;
 
                             Rectangle {
                                 width: 4px;
-                                height: 14px;
+                                height: 16px;
                                 background: #1F1D1B;
                                 border-radius: 1px;
                             }
                             Rectangle {
                                 width: 4px;
-                                height: 14px;
+                                height: 16px;
                                 background: #1F1D1B;
                                 border-radius: 1px;
                             }
                         }
 
                         play_touch := TouchArea {
-                            enabled: !root.is_loading;
+                            mouse-cursor: pointer;
                             clicked => {
                                 root.toggle_play_pause();
                             }
                         }
                     }
 
-                    // Next Button (34x34 Square)
+                    // Next Button
                     next_btn := Rectangle {
-                        width: 34px;
-                        height: 34px;
+                        width: 28px;
+                        height: 28px;
                         background: next_touch.has-hover ? #383430 : #2B2825;
                         border-width: 1px;
                         border-color: #4E4740;
@@ -481,53 +665,53 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             alignment: center;
                             spacing: 2px;
-                            padding-top: 11px;
-                            padding-bottom: 11px;
+                            padding-top: 8px;
+                            padding-bottom: 8px;
 
                             Path {
-                                width: 9px;
-                                height: 12px;
+                                width: 8px;
+                                height: 10px;
                                 fill: #E4DDD5;
-                                commands: "M 0 0 L 9 6 L 0 12 Z";
+                                commands: "M 0 0 L 8 5 L 0 10 Z";
                             }
 
                             Rectangle {
-                                width: 3px;
-                                height: 12px;
+                                width: 2px;
+                                height: 10px;
                                 background: #E4DDD5;
                                 border-radius: 1px;
                             }
                         }
 
                         next_touch := TouchArea {
-                            enabled: !root.is_loading;
+                            mouse-cursor: pointer;
                             clicked => {
                                 root.play_next();
                             }
                         }
                     }
 
-                    // Stop Button (34x34 Square)
+                    // Stop Button
                     stop_btn := Rectangle {
-                        width: 34px;
-                        height: 34px;
+                        width: 28px;
+                        height: 28px;
                         background: stop_touch.has-hover ? #383430 : #2B2825;
                         border-width: 1px;
                         border-color: #4E4740;
                         border-radius: 4px;
                         animate background { duration: 100ms; }
 
-                        // Square (Stop)
                         Rectangle {
                             x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
-                            width: 12px;
-                            height: 12px;
+                            width: 10px;
+                            height: 10px;
                             background: #E4DDD5;
                             border-radius: 2px;
                         }
 
                         stop_touch := TouchArea {
+                            mouse-cursor: pointer;
                             clicked => {
                                 root.stop();
                             }
@@ -537,16 +721,32 @@ export component AppWindow inherits Window {
 
                 // Volume row: Clean, non-collapsing layout within 145px
                 HorizontalLayout {
-                    spacing: 6px;
+                    spacing: 5px;
                     alignment: center;
 
-                    Text {
-                        text: "VOL";
-                        font-size: 10px;
-                        font-weight: 700;
-                        color: #A39A8E;
-                        vertical-alignment: center;
-                        min-width: 24px;
+                    Rectangle {
+                        width: 28px;
+                        height: 20px;
+                        background: mute_touch.has-hover ? #383430 : #2B2825;
+                        border-radius: 3px;
+                        border-width: 1px;
+                        border-color: root.is_muted ? #C9B087 : #4E4740;
+
+                        Text {
+                            text: root.is_muted ? "MUTE" : "VOL";
+                            font-size: 8px;
+                            font-weight: 700;
+                            color: root.is_muted ? #C9B087 : #A39A8E;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: 100%;
+                            height: 100%;
+                        }
+
+                        mute_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle_mute(); }
+                        }
                     }
 
                     InteractiveVolumeBar {
@@ -561,10 +761,433 @@ export component AppWindow inherits Window {
                         text: Math.round(root.volume_ratio * 100.0) + "%";
                         font-size: 10px;
                         color: #A39A8E;
-                        min-width: 30px;
+                        min-width: 28px;
                         horizontal-alignment: right;
                         vertical-alignment: center;
                     }
+                }
+            }
+        }
+
+        if root.queue_expanded: Rectangle {
+            x: 0px;
+            y: 130px;
+            width: 100%;
+            height: 180px;
+            background: #262321;
+
+            VerticalLayout {
+                padding-top: 6px;
+                padding-bottom: 6px;
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 4px;
+
+                HorizontalLayout {
+                    height: 26px;
+                    spacing: 4px;
+
+                    for tab[index] in ["SEARCH", "QUEUE", "SAVED", "HISTORY"]: Rectangle {
+                        width: 58px;
+                        height: 24px;
+                        background: root.panel_tab == tab ? #7FA09B : #2B2825;
+                        border-radius: 3px;
+
+                        Text {
+                            text: tab;
+                            color: root.panel_tab == tab ? #1F1D1B : #E4DDD5;
+                            font-size: 9px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: 100%;
+                            height: 100%;
+                        }
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.select_panel_tab(tab); }
+                        }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    Rectangle {
+                        width: 76px;
+                        height: 24px;
+                        background: #2B2825;
+                        border-radius: 3px;
+                        Text {
+                            text: root.repeat_mode_label;
+                            color: #E4DDD5;
+                            font-size: 8px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: 100%;
+                            height: 100%;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.cycle_repeat_mode(); }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 62px;
+                        height: 24px;
+                        background: root.shuffle_enabled ? #3D3833 : #2B2825;
+                        border-radius: 3px;
+                        Text {
+                            text: root.shuffle_enabled ? "SHUFFLE ON" : "SHUFFLE OFF";
+                            color: root.shuffle_enabled ? #92B7B1 : #A39A8E;
+                            font-size: 8px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: 100%;
+                            height: 100%;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle_shuffle(); }
+                        }
+                    }
+
+                    if root.panel_tab == "QUEUE" && root.queue_items.length > 0: Rectangle {
+                        width: 50px;
+                        height: 24px;
+                        background: #3D3833;
+                        border-radius: 3px;
+                        Text {
+                            text: "CLEAR";
+                            color: #D18D78;
+                            font-size: 8px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: 100%;
+                            height: 100%;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.clear_queue(); }
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.panel_message;
+                    color: #C9B087;
+                    font-size: 9px;
+                    height: root.panel_message == "" ? 0px : 14px;
+                    overflow: elide;
+                }
+
+                if root.panel_tab == "SEARCH" && root.search_results.length > 0: ListView {
+                    height: 130px;
+                    vertical-stretch: 1;
+                    for item[index] in root.search_results: Rectangle {
+                        height: 40px;
+                        background: Math.mod(index, 2) == 0 ? #2B2825 : #302C28;
+                        border-radius: 3px;
+
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            spacing: 6px;
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: transparent;
+
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Image {
+                                        source: item.cover;
+                                        image-fit: cover;
+                                        width: 32px;
+                                        height: 32px;
+                                    }
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        alignment: center;
+                                        spacing: 1px;
+                                        Text {
+                                            text: item.title;
+                                            color: #E4DDD5;
+                                            font-size: 11px;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: item.artist + "  •  " + item.duration;
+                                            color: #A39A8E;
+                                            font-size: 9px;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.play_search_result(item.key); }
+                                }
+                            }
+
+                            Rectangle {
+                                width: 28px;
+                                height: 26px;
+                                background: q_touch.has-hover ? #4E4740 : #383430;
+                                border-radius: 3px;
+                                Text {
+                                    text: "+Q";
+                                    color: #7FA09B;
+                                    font-size: 9px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    width: 100%;
+                                    height: 100%;
+                                }
+                                q_touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.enqueue_search_result(item.key); }
+                                }
+                            }
+
+                            Rectangle {
+                                width: 26px;
+                                height: 26px;
+                                background: fav_touch.has-hover ? #4E4740 : transparent;
+                                border-radius: 3px;
+                                Text {
+                                    text: item.is_favorite ? "♥" : "♡";
+                                    color: item.is_favorite ? #C9B087 : #E4DDD5;
+                                    font-size: 13px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    width: 100%;
+                                    height: 100%;
+                                }
+                                fav_touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.toggle_search_favorite(item.key); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.panel_tab == "SEARCH" && root.search_results.length == 0: Text {
+                    text: "Search for a song or paste a YouTube link.";
+                    color: #A39A8E;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    vertical-stretch: 1;
+                }
+
+                if root.panel_tab == "QUEUE" && root.queue_items.length > 0: ListView {
+                    height: 130px;
+                    vertical-stretch: 1;
+                    for item[index] in root.queue_items: Rectangle {
+                        height: 40px;
+                        background: Math.mod(index, 2) == 0 ? #2B2825 : #302C28;
+                        border-radius: 3px;
+
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            spacing: 6px;
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: transparent;
+
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Image { source: item.cover; image-fit: cover; width: 32px; height: 32px; }
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        alignment: center;
+                                        spacing: 1px;
+                                        Text { text: item.title; color: #E4DDD5; font-size: 11px; overflow: elide; }
+                                        Text { text: item.artist + "  •  " + item.duration; color: #A39A8E; font-size: 9px; overflow: elide; }
+                                    }
+                                }
+
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.play_queue_item(index); }
+                                }
+                            }
+
+                            Rectangle {
+                                width: 24px;
+                                height: 24px;
+                                background: del_touch.has-hover ? #4E4740 : transparent;
+                                border-radius: 3px;
+                                Text {
+                                    text: "✕";
+                                    color: #D18D78;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    width: 100%;
+                                    height: 100%;
+                                }
+                                del_touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.remove_queue_item(index); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.panel_tab == "QUEUE" && root.queue_items.length == 0: Text {
+                    text: "Queue is empty · add songs from Search.";
+                    color: #A39A8E;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    vertical-stretch: 1;
+                }
+
+                if root.panel_tab == "SAVED" && root.favorite_items.length > 0: ListView {
+                    height: 130px;
+                    vertical-stretch: 1;
+                    for item[index] in root.favorite_items: Rectangle {
+                        height: 40px;
+                        background: Math.mod(index, 2) == 0 ? #2B2825 : #302C28;
+                        border-radius: 3px;
+
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            spacing: 6px;
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: transparent;
+
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Image { source: item.cover; image-fit: cover; width: 32px; height: 32px; }
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        alignment: center;
+                                        spacing: 1px;
+                                        Text { text: item.title; color: #E4DDD5; font-size: 11px; overflow: elide; }
+                                        Text { text: item.artist + "  •  " + item.duration; color: #A39A8E; font-size: 9px; overflow: elide; }
+                                    }
+                                }
+
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.play_favorite(item.key); }
+                                }
+                            }
+
+                            Rectangle {
+                                width: 24px;
+                                height: 24px;
+                                background: rem_touch.has-hover ? #4E4740 : transparent;
+                                border-radius: 3px;
+                                Text {
+                                    text: "✕";
+                                    color: #C9B087;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    width: 100%;
+                                    height: 100%;
+                                }
+                                rem_touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.remove_favorite(item.key); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.panel_tab == "SAVED" && root.favorite_items.length == 0: Text {
+                    text: "No favorites saved yet.";
+                    color: #A39A8E;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    vertical-stretch: 1;
+                }
+
+                if root.panel_tab == "HISTORY" && root.history_items.length > 0: ListView {
+                    height: 130px;
+                    vertical-stretch: 1;
+                    for item[index] in root.history_items: Rectangle {
+                        height: 40px;
+                        background: Math.mod(index, 2) == 0 ? #2B2825 : #302C28;
+                        border-radius: 3px;
+
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            spacing: 6px;
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: transparent;
+
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Image { source: item.cover; image-fit: cover; width: 32px; height: 32px; }
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        alignment: center;
+                                        spacing: 1px;
+                                        Text { text: item.title; color: #E4DDD5; font-size: 11px; overflow: elide; }
+                                        Text { text: item.artist + "  •  " + item.duration; color: #A39A8E; font-size: 9px; overflow: elide; }
+                                    }
+                                }
+
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.play_history(item.key); }
+                                }
+                            }
+
+                            Rectangle {
+                                width: 26px;
+                                height: 26px;
+                                background: fav_h_touch.has-hover ? #4E4740 : transparent;
+                                border-radius: 3px;
+                                Text {
+                                    text: item.is_favorite ? "♥" : "♡";
+                                    color: item.is_favorite ? #C9B087 : #E4DDD5;
+                                    font-size: 13px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    width: 100%;
+                                    height: 100%;
+                                }
+                                fav_h_touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.favorite_history(item.key); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.panel_tab == "HISTORY" && root.history_items.length == 0: Text {
+                    text: "No recently played tracks yet.";
+                    color: #A39A8E;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    vertical-stretch: 1;
                 }
             }
         }

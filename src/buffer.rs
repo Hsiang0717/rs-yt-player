@@ -3,18 +3,21 @@ use std::io::Read;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
-pub const DEFAULT_BUFFER_CAPACITY: usize = 2 * 1024 * 1024; // 2 MB (~11.9s of 44.1kHz 16-bit stereo PCM)
+pub const DEFAULT_BUFFER_CAPACITY: usize = 2 * 1024 * 1024; // 2 MB compressed audio read-ahead buffer
+#[allow(dead_code)]
 pub const PCM_BYTES_PER_SEC: f32 = 44100.0 * 2.0 * 2.0; // 176,400 bytes/sec
 
 struct SharedBufferState {
     data: VecDeque<u8>,
     total_ingested_bytes: u64,
     is_closed: bool,
+    error: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct BufferStats {
     state: Arc<(Mutex<SharedBufferState>, Condvar, Condvar)>,
+    bytes_per_sec: f32,
 }
 
 impl BufferStats {
@@ -24,7 +27,18 @@ impl BufferStats {
     }
 
     pub fn buffered_secs(&self) -> f32 {
-        self.total_ingested_bytes() as f32 / PCM_BYTES_PER_SEC
+        self.total_ingested_bytes() as f32 / self.bytes_per_sec
+    }
+
+    pub fn is_buffering(&self) -> bool {
+        let (lock, _, _) = &*self.state;
+        let state = lock.lock().unwrap();
+        state.data.is_empty() && !state.is_closed
+    }
+
+    pub fn stream_error(&self) -> Option<String> {
+        let (lock, _, _) = &*self.state;
+        lock.lock().unwrap().error.clone()
     }
 }
 
@@ -35,13 +49,23 @@ pub struct TrackedAudioBuffer {
 }
 
 impl TrackedAudioBuffer {
-    pub fn new<R: Read + Send + 'static>(mut reader: R, capacity: usize) -> (Self, BufferStats) {
+    #[allow(dead_code)]
+    pub fn new<R: Read + Send + 'static>(reader: R, capacity: usize) -> (Self, BufferStats) {
+        Self::new_with_rate(reader, capacity, PCM_BYTES_PER_SEC)
+    }
+
+    pub fn new_with_rate<R: Read + Send + 'static>(
+        mut reader: R,
+        capacity: usize,
+        bytes_per_sec: f32,
+    ) -> (Self, BufferStats) {
         let effective_capacity = capacity.max(1024);
         let state = Arc::new((
             Mutex::new(SharedBufferState {
                 data: VecDeque::with_capacity(effective_capacity.min(64 * 1024)),
                 total_ingested_bytes: 0,
                 is_closed: false,
+                error: None,
             }),
             Condvar::new(), // not_empty
             Condvar::new(), // not_full
@@ -86,10 +110,11 @@ impl TrackedAudioBuffer {
                             }
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(_) => {
+                        Err(error) => {
                             // Pipe broken or closed
                             let (lock, not_empty, _) = &*state_producer;
                             let mut s = lock.lock().unwrap();
+                            s.error = Some(error.to_string());
                             s.is_closed = true;
                             not_empty.notify_all();
                             break;
@@ -101,6 +126,7 @@ impl TrackedAudioBuffer {
 
         let stats = BufferStats {
             state: Arc::clone(&state),
+            bytes_per_sec: bytes_per_sec.max(1.0),
         };
 
         let buffer = Self {
@@ -159,7 +185,7 @@ impl Drop for TrackedAudioBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{Cursor, Error};
 
     #[test]
     fn test_tracked_audio_buffer() {
@@ -179,5 +205,30 @@ mod tests {
 
         assert_eq!(output, fake_data);
         assert_eq!(stats.total_ingested_bytes(), 10000);
+    }
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            Err(Error::other("simulated stream interruption"))
+        }
+    }
+
+    #[test]
+    fn tracked_buffer_exposes_runtime_stream_errors() {
+        let (_buffer, stats) = TrackedAudioBuffer::new(FailingReader, 1024);
+        for _ in 0..100 {
+            if stats.stream_error().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        assert_eq!(
+            stats.stream_error().as_deref(),
+            Some("simulated stream interruption")
+        );
+        assert!(!stats.is_buffering());
     }
 }
