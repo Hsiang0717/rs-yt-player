@@ -14,13 +14,14 @@
 2. [上一曲 / 下一曲 (Prev/Next) 隊列與歷史紀錄架構](#2-上一曲--下一曲-prevnext-隊列與歷史紀錄架構)
    - 2.1 歷史堆疊 (History) 與當前曲目 (Current)
    - 2.2 防重入 (Re-entrancy) 與自動播放競態條件保護
+   - 2.3 搜尋、收藏、播放紀錄與循環模式
 3. [Slint 視窗生命週期與 Win32 子類化 (Subclassing) 整合](#3-slint-視窗生命週期與-win32-子類化-subclassing-整合)
    - 3.1 視窗句柄 (HWND) 的非同步建立時序
    - 3.2 最小化隱藏到系統匣 (Minimize to Tray)
    - 3.3 GUI 子系統之命令列輸出 (stdout/stderr) 行為
 4. [純音訊串流管線與 Sidecar 管理](#4-純音訊串流管線與-sidecar-管理)
    - 4.1 yt-dlp 直鏈解析與 Sidecar 搜尋優先序
-   - 4.2 ffmpeg PCM 管道與 Rodio WASAPI 串流架構
+   - 4.2 AAC 分段串流與 Symphonia 解碼架構
 5. [常見除錯與指令速查 (Troubleshooting Cheat Sheet)](#5-常見除錯與指令速查-troubleshooting-cheat-sheet)
 
 ---
@@ -108,6 +109,13 @@ Windows Shell (`ShellExperienceHost.exe`) 在渲染 SMTC 視窗時，依循以�
 *   在切換歌曲開始前先將旗標設為 `true`，切換結束後重置為 `false`。
 *   避免 100ms 輪詢計時器中的 `player.has_ended()` 在新歌緩衝階段重複觸發多次跳曲。
 
+### 2.3 搜尋、收藏、播放紀錄與循環模式
+*   關鍵字搜尋透過 `ytsearch10:` 取得最多十筆結果，先呈現歌名、頻道、長度和封面；使用者可選擇播放、加入佇列或收藏。貼上的影片與播放清單網址仍可直接播放。
+*   `src/library.rs` 將收藏、最近播放（最多 100 首）、循環模式與隨機播放設定存於 `%APPDATA%\YouTubeAudioPlayer\library.json`。封面快取存於同目錄的 `covers` 子目錄。
+*   佇列項目支援直接播放、移除與上下移動。單曲循環在曲目結束時重播目前歌曲；佇列循環在待播項目用盡時，依播放歷史與目前曲目重建循環；隨機模式從待播項目中選取下一首。
+*   播放解析或串流初始化失敗時，介面顯示錯誤並提供 Retry；Range 與 yt-dlp pipe 讀取器也會回報執行期間的串流錯誤，避免被誤判為正常播畢。搜尋失敗則在搜尋面板顯示錯誤，使用者可重新送出搜尋。
+*   播放狀態輪詢會讀取兩種串流緩衝器的等待狀態，於資料暫時耗盡時顯示 `BUFFERING`，資料恢復後回到 `PLAYING`；暫停期間維持 `PAUSED`。
+
 ---
 
 ## 3. Slint 視窗生命週期與 Win32 子類化 (Subclassing) 整合
@@ -119,14 +127,18 @@ Windows Shell (`ShellExperienceHost.exe`) 在渲染 SMTC 視窗時，依循以�
 
 ### 3.2 最小化隱藏到系統匣 (Minimize to Tray)
 *   **挑戰**：Windows 傳統視窗點擊「縮小按鈕（`-`）」會將視窗最小化至工作列，但需求是「完全從工作列隱藏，只常駐系統匣」，且不能中斷背景音樂。
-*   **實作**：使用 Win32 Window Subclassing (`SetWindowSubclass`) 攔截 `WM_SYSCOMMAND`：
+*   **實作**：使用 Win32 Window Subclassing (`SetWindowSubclass`) 攔截 `SC_MINIMIZE` 與 `WM_SIZE/SIZE_MINIMIZED`，然後隱藏 HWND 並切換為 tool-window 樣式，避免工作列保留按鈕。喚醒時還原 app-window 樣式。
     ```rust
     const SC_MINIMIZE_CODE: usize = 0xF020;
-    if msg == WM_SYSCOMMAND && (wparam.0 & 0xFFF0) == SC_MINIMIZE_CODE {
+    let minimize_command = msg == WM_SYSCOMMAND && (wparam.0 & 0xFFF0) == SC_MINIMIZE_CODE;
+    let minimized_size = msg == WM_SIZE && wparam.0 == SIZE_MINIMIZED as usize;
+    if minimize_command || minimized_size {
         unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
-        return LRESULT(0); // 阻止 Windows 預設的縮小到工作列動作
+        return LRESULT(0);
     }
     ```
+*   移除 `WS_THICKFRAME` 與 `WS_MAXIMIZEBOX`，並在 Slint 中將寬度設為 540 logical px。清單面板收合與展開時，視窗高度分別動態調整為 130 與 310 logical px。
+*   `build.rs` 嵌入 Windows DPI manifest，設定 `dpiAwareness` 為 `System`（並提供舊版 Windows 的 `dpiAware=true`）。這讓視窗跨越縮放比例不同的螢幕時維持相同的實際視窗尺寸；次要螢幕的縮放比例不同時，介面可能稍微模糊。
 *   **喚醒**：當使用者在系統匣點擊「顯示主視窗」時，呼叫 `ShowWindow(hwnd, SW_SHOW)` 與 `SetForegroundWindow(hwnd)`。
 
 ### 3.3 GUI 子系統之命令列輸出 (stdout/stderr) 行為
@@ -148,10 +160,13 @@ Windows Shell (`ShellExperienceHost.exe`) 在渲染 SMTC 視窗時，依循以�
 3.  專案根目錄 `./bin/yt-dlp.exe`。
 4.  若皆不存在，自動從 GitHub Official Release 下載並顯示進度條。
 
-### 4.2 ffmpeg PCM 管道與 Rodio WASAPI 串流架構
-*   使用 `yt-dlp -g -f bestaudio[ext=webm]/bestaudio` 取得 Google CDN 直接音訊串流網址。
-*   透過 `ffmpeg.exe -ss <offset> -i <stream_url> -vn -f s16le -ar 48000 -ac 2 pipe:1` 將音訊轉換為未壓縮 PCM。
-*   由 `rodio::OutputStream` 直接播放取樣，免去下載整首檔案的時間，點播 1-2 秒內即可出聲。
+### 4.2 AAC 分段串流與 Symphonia 解碼架構
+*   使用 `yt-dlp -j -f bestaudio[ext=m4a]` 取得 Google CDN 的 AAC/M4A 音訊直鏈與 metadata，選用 Symphonia 內建支援的格式，不需要 ffmpeg。
+*   一般播放與 seek 都優先使用帶 yt-dlp HTTP headers 的 Range reader；Symphonia 透過 MP4 sample index 定位，Range 資料由背景執行緒預取，音訊 callback 不直接執行網路請求。
+*   Range 不可用時，回退到 `yt-dlp --http-chunk-size 10M -o - <stream_url>` 的壓縮音訊 pipe；`Symphonia` 直接解碼 AAC，不啟動 ffmpeg。
+*   YouTube 網址的 `t=`, `start=` 或 `time_continue=` 會作為起播秒數；Range 可用時，長影片可直接跳到目標範圍，不必從開頭解碼數小時的音訊。playlist radio URL 會優先從 `v=` 指定的歌曲開始。
+*   `AudioPlayer::stop()` 會結束回退路徑的 yt-dlp 子程序、通知 Range 預取停止並清空音訊緩衝。自動切歌會等音訊來源結束，不會只依賴影片時長估算。
+
 
 ---
 
