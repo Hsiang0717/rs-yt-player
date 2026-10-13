@@ -118,30 +118,43 @@ Windows Shell (`ShellExperienceHost.exe`) 在渲染 SMTC 視窗時，依循以�
 
 ---
 
-## 3. Slint 視窗生命週期與 Win32 子類化 (Subclassing) 整合
+## 3. Slint 視窗生命週期、Win32 子類化與單一實例機制
 
-### 3.1 視窗句柄 (HWND) 的非同步建立時序
-*   在 Slint (`slint-1.9`) 中，呼叫 `app.show()?` 僅是向事件佇列送出顯示請求，實際 Win32 HWND 的建立與標題指定會在首次訊息泵（Message Pump）處理時完成。
-*   若在 `app.show()?` 後立即呼叫 `FindWindowW`，可能會回傳 `0`。
-*   **解法**：在啟動時執行短暫的 `PeekMessageW / TranslateMessage / DispatchMessageW` 訊息泵迴圈（最多 500ms），即可 100% 同步取得主視窗 HWND。
+### 3.1 視窗句柄 (HWND) 的精準捕獲與輔助視窗排除
+*   在 Slint (`slint-1.9`) 中，呼叫 `app.show()?` 後，Win32 HWND 的建立由底層 `winit` 負責。
+*   **致命陷阱（輔助視窗競態）**：Windows 與輸入法會在同一進程中建立多個隱藏輔助視窗（如 `UAC_InputIndicatorOverlayWnd`、`Winit Thread Event Target`、`CiceroUIWndFrame` 等）。若僅靠 PID 或標題查找，極易在標題尚未繪製前誤將 Subclass 掛載到無關的輔助視窗上，導致主視窗失去縮小攔截能力。
+*   **最佳實踐**：透過 `EnumWindows` + `GetWindowThreadProcessId` 鎖定當前進程，並**嚴格過濾視窗類別 `GetClassNameW(hwnd) == "Window Class"`**，確保 100% 準確鎖定 winit 頂層主視窗。
 
 ### 3.2 最小化隱藏到系統匣 (Minimize to Tray)
 *   **挑戰**：Windows 傳統視窗點擊「縮小按鈕（`-`）」會將視窗最小化至工作列，但需求是「完全從工作列隱藏，只常駐系統匣」，且不能中斷背景音樂。
-*   **實作**：使用 Win32 Window Subclassing (`SetWindowSubclass`) 攔截 `SC_MINIMIZE` 與 `WM_SIZE/SIZE_MINIMIZED`，然後隱藏 HWND 並切換為 tool-window 樣式，避免工作列保留按鈕。喚醒時還原 app-window 樣式。
+*   **實作**：使用 Win32 Window Subclassing (`SetWindowSubclass`) 攔截 `SC_MINIMIZE` 與 `WM_SIZE/SIZE_MINIMIZED`，呼叫 `set_taskbar_button(hwnd, false)` 切換為 tool-window 樣式並執行 `ShowWindow(hwnd, SW_HIDE)`，使工作列圖示瞬間完全消失。
     ```rust
     const SC_MINIMIZE_CODE: usize = 0xF020;
     let minimize_command = msg == WM_SYSCOMMAND && (wparam.0 & 0xFFF0) == SC_MINIMIZE_CODE;
     let minimized_size = msg == WM_SIZE && wparam.0 == SIZE_MINIMIZED as usize;
     if minimize_command || minimized_size {
-        unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
+        unsafe {
+            set_taskbar_button(hwnd, false);
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
         return LRESULT(0);
     }
     ```
-*   移除 `WS_THICKFRAME` 與 `WS_MAXIMIZEBOX`，並在 Slint 中將寬度設為 540 logical px。清單面板收合與展開時，視窗高度分別動態調整為 130 與 310 logical px。
-*   `build.rs` 嵌入 Windows DPI manifest，設定 `dpiAwareness` 為 `System`（並提供舊版 Windows 的 `dpiAware=true`）。這讓視窗跨越縮放比例不同的螢幕時維持相同的實際視窗尺寸；次要螢幕的縮放比例不同時，介面可能稍微模糊。
-*   **喚醒**：當使用者在系統匣點擊「顯示主視窗」時，呼叫 `ShowWindow(hwnd, SW_SHOW)` 與 `SetForegroundWindow(hwnd)`。
+*   **COM STA 初始化**：系統匣的 Shell Notification (`tray-icon`) 在 Windows 上強烈依賴 STA (Single-Threaded Apartment) 模型，必須在啟動時明確呼叫 `CoInitializeEx(None, COINIT_APARTMENTTHREADED)` 以確保圖示正常登記與響應。
+*   **喚醒**：當使用者在系統匣點擊「顯示主視窗」或雙擊圖示時，呼叫 `set_taskbar_button(hwnd, true)`、`ShowWindow(hwnd, SW_SHOW)`、`SW_RESTORE` 與 `SetForegroundWindow(hwnd)`。
 
-### 3.3 GUI 子系統之命令列輸出 (stdout/stderr) 行為
+### 3.3 防止重複多開 (Single-Instance Mutex)
+*   為避免使用者重複啟動多個實例造成 WASAPI 聲卡搶占與資源浪費，使用 Win32 Named Mutex `Local\YouTubeAudioPlayer_SingleInstance_Mutex`。
+*   若偵測到 `ERROR_ALREADY_EXISTS`，新實例會主動喚醒既有視窗至最前景，並乾淨退出自身，達成無縫的單實例體驗。
+
+### 3.4 模組化 UI 架構 (Slint Refactoring)
+*   將原本超過 1,240 行的單體檔案 [ui/app_window.slint](file:///C:/Users/Administrator/Desktop/rs-yt-player/ui/app_window.slint) 拆解重構為模組化結構（主檔縮減至約 700 行）：
+    - **`ui/theme.slint`**：`global Theme` 集中定義 Morandi Warm Oat 設計規範與色彩 Token。
+    - **`ui/models.slint`**：`TrackRow` 共用資料結構。
+    - **`ui/components/`**：`InteractiveProgressBar`、`InteractiveVolumeBar`、`LoadingSpinner` 通用控制元件。
+    - **`ui/views/track_item.slint`**：`TrackItemView` 統一收斂四大清單（搜尋、佇列、收藏、歷史）的單行版面，大幅消滅重複代碼。
+
+### 3.5 GUI 子系統之命令列輸出 (stdout/stderr) 行為
 *   專案標記了 `#![windows_subsystem = "windows"]`，使應用程式在雙擊啟動時不會彈出黑色命令提示字元視窗。
 *   **除錯注意**：在 PowerShell 中直接執行 GUI 執行檔時，PowerShell 會將其視為非同步程式並立即返回提示字元。
 *   **解決方式**：
