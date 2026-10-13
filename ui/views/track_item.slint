@@ -1,0 +1,151 @@
+import { Theme } from "../theme.slint";
+import { TrackRow } from "../models.slint";
+
+export component TrackItemView inherits Rectangle {
+    in property <TrackRow> item;
+    in property <int> index: 0;
+    in property <string> mode: "SEARCH"; // "SEARCH", "QUEUE", "SAVED", "HISTORY"
+
+    callback play();
+    callback enqueue();
+    callback toggle_fav();
+    callback remove();
+
+    height: 40px;
+    background: root.item.is_current ? Theme.surface_hover : (Math.mod(root.index, 2) == 0 ? Theme.surface : Theme.surface_alt);
+    border-radius: 3px;
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 6px;
+
+        // Track Info & Cover (Click to play)
+        Rectangle {
+            horizontal-stretch: 1;
+            background: transparent;
+
+            HorizontalLayout {
+                spacing: 6px;
+                Image {
+                    source: root.item.cover;
+                    image-fit: cover;
+                    width: 32px;
+                    height: 32px;
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 1px;
+                    Text {
+                        text: root.item.title;
+                        color: root.item.is_current ? Theme.accent_green : Theme.text_primary;
+                        font-size: 11px;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.item.artist + "  •  " + root.item.duration;
+                        color: Theme.text_secondary;
+                        font-size: 9px;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.play(); }
+            }
+        }
+
+        // Search: +Q button
+        if root.mode == "SEARCH": Rectangle {
+            width: 28px;
+            height: 26px;
+            background: q_touch.has-hover ? Theme.border : Theme.surface_active;
+            border-radius: 3px;
+
+            Path {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 14px;
+                height: 12px;
+                stroke: Theme.accent_green;
+                stroke-width: 1.4px;
+                commands: "M 1 3 L 8 3 M 1 6 L 8 6 M 1 9 L 6 9 M 11 6 L 11 12 M 8 9 L 14 9";
+            }
+
+            q_touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.enqueue(); }
+            }
+        }
+
+        // Search / History: Favorite Button
+        if root.mode == "SEARCH" || root.mode == "HISTORY": Rectangle {
+            width: 26px;
+            height: 26px;
+            background: fav_touch.has-hover ? Theme.border : transparent;
+            border-radius: 3px;
+            Text {
+                text: root.item.is_favorite ? "♥" : "♡";
+                color: root.item.is_favorite ? Theme.accent_gold : Theme.text_primary;
+                font-size: 13px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+            fav_touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.toggle_fav(); }
+            }
+        }
+
+        // Saved: Remove from Favorites Button
+        if root.mode == "SAVED": Rectangle {
+            width: 24px;
+            height: 24px;
+            background: rem_touch.has-hover ? Theme.border : transparent;
+            border-radius: 3px;
+            Text {
+                text: "✕";
+                color: Theme.accent_gold;
+                font-size: 11px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+            rem_touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.remove(); }
+            }
+        }
+
+        // Queue: Remove from Queue Button
+        if root.mode == "QUEUE": Rectangle {
+            width: 24px;
+            height: 24px;
+            background: rm_touch.has-hover ? Theme.border : transparent;
+            border-radius: 3px;
+
+            Text {
+                text: "✕";
+                color: Theme.accent_danger;
+                font-size: 11px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+
+            rm_touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.remove(); }
+            }
+        }
+    }
+}

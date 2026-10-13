@@ -1,207 +1,13 @@
 import { LineEdit, ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { TrackRow } from "models.slint";
+export { TrackRow }
 
-export struct TrackRow {
-    key: string,
-    title: string,
-    artist: string,
-    duration: string,
-    cover: image,
-    is_current: bool,
-    is_favorite: bool,
-}
+import { InteractiveProgressBar } from "components/progress_bar.slint";
+import { InteractiveVolumeBar } from "components/volume_bar.slint";
+import { LoadingSpinner } from "components/loading_spinner.slint";
+import { TrackItemView } from "views/track_item.slint";
 
-// --- Morandi Colors ---
-// Background: #1F1D1B
-// Card/Surface: #2B2825
-// Border: #4E4740
-// Text Primary: #E4DDD5
-// Text Secondary: #A39A8E
-// Accent Sage Green: #7FA09B
-// Accent Gold/Yellow: #C9B087
-// Track Dark: #383430
-
-component InteractiveProgressBar {
-    in-out property <float> ratio: 0.0;
-    in-out property <float> buffer_ratio: 0.0;
-    in-out property <bool> is_scrubbing: false;
-    in-out property <bool> enabled: true;
-    callback user_scrub(float);
-    callback user_seek(float);
-
-    height: 22px;
-    min-width: 120px;
-    horizontal-stretch: 1;
-
-    track := Rectangle {
-        width: 100%;
-        y: (parent.height - self.height) / 2;
-        height: touch.has-hover || root.is_scrubbing ? 6px : 4px;
-        background: #3D3833;
-        border-radius: self.height / 2;
-        animate height { duration: 80ms; }
-
-        buffer_fill := Rectangle {
-            x: 0;
-            y: 0;
-            width: parent.width * Math.max(0.0, Math.min(1.0, root.buffer_ratio));
-            height: parent.height;
-            background: #524B44;
-            border-radius: self.height / 2;
-            animate width { duration: 100ms; }
-        }
-
-        fill := Rectangle {
-            x: 0;
-            y: 0;
-            width: parent.width * Math.max(0.0, Math.min(1.0, root.ratio));
-            height: parent.height;
-            background: touch.has-hover || root.is_scrubbing ? #92B7B1 : #7FA09B;
-            border-radius: self.height / 2;
-            animate background { duration: 80ms; }
-        }
-
-        thumb := Rectangle {
-            x: Math.max(0px, Math.min(parent.width - self.width, parent.width * Math.max(0.0, Math.min(1.0, root.ratio)) - (self.width / 2)));
-            y: (parent.height - self.height) / 2;
-            width: touch.has-hover || root.is_scrubbing ? 14px : 10px;
-            height: self.width;
-            border-radius: self.width / 2;
-            background: #E4DDD5;
-            border-width: 1px;
-            border-color: #1F1D1B;
-            animate width { duration: 80ms; }
-        }
-    }
-
-    touch := TouchArea {
-        width: 100%;
-        height: 100%;
-        enabled: root.enabled;
-        mouse-cursor: root.enabled ? pointer : default;
-
-        pointer-event(event) => {
-            if (event.kind == PointerEventKind.down) {
-                root.is_scrubbing = true;
-                let clamped = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
-                root.ratio = clamped;
-                root.user_scrub(clamped);
-            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
-                if (root.is_scrubbing) {
-                    let clamped = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
-                    root.ratio = clamped;
-                    root.is_scrubbing = false;
-                    root.user_seek(clamped);
-                }
-            }
-        }
-
-        moved => {
-            if (self.pressed) {
-                root.is_scrubbing = true;
-                let clamped = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
-                root.ratio = clamped;
-                root.user_scrub(clamped);
-            }
-        }
-    }
-}
-
-component InteractiveVolumeBar {
-    in-out property <float> volume: 1.0;
-    callback user_volume(float);
-
-    height: 20px;
-    min-width: 60px;
-
-    track := Rectangle {
-        width: 100%;
-        y: (parent.height - self.height) / 2;
-        height: 4px;
-        background: #383430;
-        border-radius: 2px;
-
-        fill := Rectangle {
-            x: 0;
-            y: 0;
-            width: parent.width * Math.max(0.0, Math.min(1.0, root.volume));
-            height: parent.height;
-            background: #7FA09B;
-            border-radius: 2px;
-        }
-
-        thumb := Rectangle {
-            x: Math.max(0px, Math.min(parent.width - self.width, parent.width * Math.max(0.0, Math.min(1.0, root.volume)) - (self.width / 2)));
-            y: (parent.height - self.height) / 2;
-            width: touch.has-hover ? 12px : 8px;
-            height: self.width;
-            border-radius: self.width / 2;
-            background: #E4DDD5;
-            animate width { duration: 80ms; }
-        }
-    }
-
-    touch := TouchArea {
-        width: 100%;
-        height: 100%;
-        mouse-cursor: pointer;
-
-        moved => {
-            if (self.pressed) {
-                let clamped = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
-                root.volume = clamped;
-                root.user_volume(clamped);
-            }
-        }
-
-        clicked => {
-            let clamped = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
-            root.volume = clamped;
-            root.user_volume(clamped);
-        }
-    }
-}
-
-component LoadingSpinner {
-    in property <bool> loading: false;
-    width: 14px;
-    height: 14px;
-
-    property <float> pulse: 0.0;
-
-    animate pulse {
-        duration: 900ms;
-        iteration-count: -1;
-        easing: ease-in-out;
-    }
-
-    states [
-        active when root.loading: {
-            pulse: 1.0;
-        }
-        inactive when !root.loading: {
-            pulse: 0.0;
-        }
-    ]
-
-    Rectangle {
-        width: 100%;
-        height: 100%;
-        border-radius: 7px;
-        border-width: 2px;
-        border-color: #C9B087;
-        opacity: 0.3 + 0.7 * root.pulse;
-    }
-
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 6px + 4px * root.pulse;
-        height: self.width;
-        border-radius: self.width / 2;
-        background: #C9B087;
-        opacity: 0.5 + 0.5 * root.pulse;
-    }
-}
 
 export component AppWindow inherits Window {
     title: "YouTube Audio Player";
@@ -937,95 +743,13 @@ export component AppWindow inherits Window {
                 if root.panel_tab == "SEARCH" && root.search_results.length > 0: ListView {
                     height: 130px;
                     vertical-stretch: 1;
-                    for item[index] in root.search_results: Rectangle {
-                        height: 40px;
-                        background: Math.mod(index, 2) == 0 ? #2B2825 : #302C28;
-                        border-radius: 3px;
-
-                        HorizontalLayout {
-                            padding-left: 6px;
-                            padding-right: 6px;
-                            spacing: 6px;
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                background: transparent;
-
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    Image {
-                                        source: item.cover;
-                                        image-fit: cover;
-                                        width: 32px;
-                                        height: 32px;
-                                    }
-                                    VerticalLayout {
-                                        horizontal-stretch: 1;
-                                        alignment: center;
-                                        spacing: 1px;
-                                        Text {
-                                            text: item.title;
-                                            color: #E4DDD5;
-                                            font-size: 11px;
-                                            overflow: elide;
-                                        }
-                                        Text {
-                                            text: item.artist + "  •  " + item.duration;
-                                            color: #A39A8E;
-                                            font-size: 9px;
-                                            overflow: elide;
-                                        }
-                                    }
-                                }
-
-                                TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.play_search_result(item.key); }
-                                }
-                            }
-
-                            Rectangle {
-                                width: 28px;
-                                height: 26px;
-                                background: q_touch.has-hover ? #4E4740 : #383430;
-                                border-radius: 3px;
-
-                                Path {
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                    width: 14px;
-                                    height: 12px;
-                                    stroke: #7FA09B;
-                                    stroke-width: 1.4px;
-                                    commands: "M 1 3 L 8 3 M 1 6 L 8 6 M 1 9 L 6 9 M 11 6 L 11 12 M 8 9 L 14 9";
-                                }
-
-                                q_touch := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.enqueue_search_result(item.key); }
-                                }
-                            }
-
-                            Rectangle {
-                                width: 26px;
-                                height: 26px;
-                                background: fav_touch.has-hover ? #4E4740 : transparent;
-                                border-radius: 3px;
-                                Text {
-                                    text: item.is_favorite ? "♥" : "♡";
-                                    color: item.is_favorite ? #C9B087 : #E4DDD5;
-                                    font-size: 13px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    width: 100%;
-                                    height: 100%;
-                                }
-                                fav_touch := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.toggle_search_favorite(item.key); }
-                                }
-                            }
-                        }
+                    for item[index] in root.search_results: TrackItemView {
+                        item: item;
+                        index: index;
+                        mode: "SEARCH";
+                        play => { root.play_search_result(item.key); }
+                        enqueue => { root.enqueue_search_result(item.key); }
+                        toggle_fav => { root.toggle_search_favorite(item.key); }
                     }
                 }
 
@@ -1041,59 +765,12 @@ export component AppWindow inherits Window {
                 if root.panel_tab == "QUEUE" && root.queue_items.length > 0: ListView {
                     height: 130px;
                     vertical-stretch: 1;
-                    for item[index] in root.queue_items: Rectangle {
-                        height: 40px;
-                        background: Math.mod(index, 2) == 0 ? #2B2825 : #302C28;
-                        border-radius: 3px;
-
-                        HorizontalLayout {
-                            padding-left: 6px;
-                            padding-right: 6px;
-                            spacing: 6px;
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                background: transparent;
-
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    Image { source: item.cover; image-fit: cover; width: 32px; height: 32px; }
-                                    VerticalLayout {
-                                        horizontal-stretch: 1;
-                                        alignment: center;
-                                        spacing: 1px;
-                                        Text { text: item.title; color: #E4DDD5; font-size: 11px; overflow: elide; }
-                                        Text { text: item.artist + "  •  " + item.duration; color: #A39A8E; font-size: 9px; overflow: elide; }
-                                    }
-                                }
-
-                                TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.play_queue_item(index); }
-                                }
-                            }
-
-                            Rectangle {
-                                width: 24px;
-                                height: 24px;
-                                background: del_touch.has-hover ? #4E4740 : transparent;
-                                border-radius: 3px;
-                                Text {
-                                    text: "✕";
-                                    color: #D18D78;
-                                    font-size: 11px;
-                                    font-weight: 700;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    width: 100%;
-                                    height: 100%;
-                                }
-                                del_touch := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.remove_queue_item(index); }
-                                }
-                            }
-                        }
+                    for item[index] in root.queue_items: TrackItemView {
+                        item: item;
+                        index: index;
+                        mode: "QUEUE";
+                        play => { root.play_queue_item(index); }
+                        remove => { root.remove_queue_item(index); }
                     }
                 }
 
@@ -1109,59 +786,12 @@ export component AppWindow inherits Window {
                 if root.panel_tab == "SAVED" && root.favorite_items.length > 0: ListView {
                     height: 130px;
                     vertical-stretch: 1;
-                    for item[index] in root.favorite_items: Rectangle {
-                        height: 40px;
-                        background: Math.mod(index, 2) == 0 ? #2B2825 : #302C28;
-                        border-radius: 3px;
-
-                        HorizontalLayout {
-                            padding-left: 6px;
-                            padding-right: 6px;
-                            spacing: 6px;
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                background: transparent;
-
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    Image { source: item.cover; image-fit: cover; width: 32px; height: 32px; }
-                                    VerticalLayout {
-                                        horizontal-stretch: 1;
-                                        alignment: center;
-                                        spacing: 1px;
-                                        Text { text: item.title; color: #E4DDD5; font-size: 11px; overflow: elide; }
-                                        Text { text: item.artist + "  •  " + item.duration; color: #A39A8E; font-size: 9px; overflow: elide; }
-                                    }
-                                }
-
-                                TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.play_favorite(item.key); }
-                                }
-                            }
-
-                            Rectangle {
-                                width: 24px;
-                                height: 24px;
-                                background: rem_touch.has-hover ? #4E4740 : transparent;
-                                border-radius: 3px;
-                                Text {
-                                    text: "✕";
-                                    color: #C9B087;
-                                    font-size: 11px;
-                                    font-weight: 700;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    width: 100%;
-                                    height: 100%;
-                                }
-                                rem_touch := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.remove_favorite(item.key); }
-                                }
-                            }
-                        }
+                    for item[index] in root.favorite_items: TrackItemView {
+                        item: item;
+                        index: index;
+                        mode: "SAVED";
+                        play => { root.play_favorite(item.key); }
+                        remove => { root.remove_favorite(item.key); }
                     }
                 }
 
@@ -1177,58 +807,12 @@ export component AppWindow inherits Window {
                 if root.panel_tab == "HISTORY" && root.history_items.length > 0: ListView {
                     height: 130px;
                     vertical-stretch: 1;
-                    for item[index] in root.history_items: Rectangle {
-                        height: 40px;
-                        background: Math.mod(index, 2) == 0 ? #2B2825 : #302C28;
-                        border-radius: 3px;
-
-                        HorizontalLayout {
-                            padding-left: 6px;
-                            padding-right: 6px;
-                            spacing: 6px;
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                background: transparent;
-
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    Image { source: item.cover; image-fit: cover; width: 32px; height: 32px; }
-                                    VerticalLayout {
-                                        horizontal-stretch: 1;
-                                        alignment: center;
-                                        spacing: 1px;
-                                        Text { text: item.title; color: #E4DDD5; font-size: 11px; overflow: elide; }
-                                        Text { text: item.artist + "  •  " + item.duration; color: #A39A8E; font-size: 9px; overflow: elide; }
-                                    }
-                                }
-
-                                TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.play_history(item.key); }
-                                }
-                            }
-
-                            Rectangle {
-                                width: 26px;
-                                height: 26px;
-                                background: fav_h_touch.has-hover ? #4E4740 : transparent;
-                                border-radius: 3px;
-                                Text {
-                                    text: item.is_favorite ? "♥" : "♡";
-                                    color: item.is_favorite ? #C9B087 : #E4DDD5;
-                                    font-size: 13px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    width: 100%;
-                                    height: 100%;
-                                }
-                                fav_h_touch := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.favorite_history(item.key); }
-                                }
-                            }
-                        }
+                    for item[index] in root.history_items: TrackItemView {
+                        item: item;
+                        index: index;
+                        mode: "HISTORY";
+                        play => { root.play_history(item.key); }
+                        toggle_fav => { root.favorite_history(item.key); }
                     }
                 }
 

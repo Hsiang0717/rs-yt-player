@@ -1,0 +1,87 @@
+import { Theme } from "../theme.slint";
+
+export component InteractiveProgressBar {
+    in-out property <float> ratio: 0.0;
+    in-out property <float> buffer_ratio: 0.0;
+    in-out property <bool> is_scrubbing: false;
+    in-out property <bool> enabled: true;
+    callback user_scrub(float);
+    callback user_seek(float);
+
+    height: 22px;
+    min-width: 120px;
+    horizontal-stretch: 1;
+
+    track := Rectangle {
+        width: 100%;
+        y: (parent.height - self.height) / 2;
+        height: touch.has-hover || root.is_scrubbing ? 6px : 4px;
+        background: Theme.track_bg;
+        border-radius: self.height / 2;
+        animate height { duration: 80ms; }
+
+        buffer_fill := Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width * Math.max(0.0, Math.min(1.0, root.buffer_ratio));
+            height: parent.height;
+            background: Theme.track_buffer;
+            border-radius: self.height / 2;
+            animate width { duration: 100ms; }
+        }
+
+        fill := Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width * Math.max(0.0, Math.min(1.0, root.ratio));
+            height: parent.height;
+            background: touch.has-hover || root.is_scrubbing ? Theme.accent_green_active : Theme.accent_green;
+            border-radius: self.height / 2;
+            animate background { duration: 80ms; }
+        }
+
+        thumb := Rectangle {
+            x: Math.max(0px, Math.min(parent.width - self.width, parent.width * Math.max(0.0, Math.min(1.0, root.ratio)) - (self.width / 2)));
+            y: (parent.height - self.height) / 2;
+            width: touch.has-hover || root.is_scrubbing ? 14px : 10px;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: Theme.text_primary;
+            border-width: 1px;
+            border-color: Theme.bg;
+            animate width { duration: 80ms; }
+        }
+    }
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.is_scrubbing = true;
+                let clamped = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
+                root.ratio = clamped;
+                root.user_scrub(clamped);
+            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                if (root.is_scrubbing) {
+                    let clamped = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
+                    root.ratio = clamped;
+                    root.is_scrubbing = false;
+                    root.user_seek(clamped);
+                }
+            }
+        }
+
+        moved => {
+            if (self.pressed) {
+                root.is_scrubbing = true;
+                let clamped = Math.max(0.0, Math.min(1.0, self.mouse-x / self.width));
+                root.ratio = clamped;
+                root.user_scrub(clamped);
+            }
+        }
+    }
+}
