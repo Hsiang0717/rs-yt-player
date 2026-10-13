@@ -30,7 +30,7 @@ use tracing_subscriber::FmtSubscriber;
 use tray::SystemTray;
 use ui_callbacks::{register_ui_callbacks, PendingSeekState};
 use ui_models::{queue_items_model, records_model};
-use win32_window::{setup_windows_app_identity, try_find_and_hook};
+use win32_window::{acquire_single_instance, setup_windows_app_identity, try_find_and_hook};
 use windows::Win32::Foundation::HWND;
 
 #[tokio::main]
@@ -51,6 +51,15 @@ async fn main() -> Result<()> {
     }
 
     // 3. GUI Mode (Slint + Windows System Tray + SMTC)
+    #[cfg(target_os = "windows")]
+    let _single_instance_guard = match acquire_single_instance() {
+        Some(guard) => guard,
+        None => {
+            info!("Single instance already active; brought existing window to front. Exiting.");
+            return Ok(());
+        }
+    };
+
     #[cfg(target_os = "windows")]
     setup_windows_app_identity();
 
@@ -97,7 +106,7 @@ async fn main() -> Result<()> {
     // Find and subclass the Slint window HWND to hook minimize -> tray
     let main_hwnd: Arc<Mutex<Option<HWND>>> = Arc::new(Mutex::new(None));
     unsafe {
-        for _ in 0..10 {
+        for _ in 0..20 {
             if let Some(hwnd) = try_find_and_hook() {
                 info!(
                     "Attached Win32 minimize-to-tray subclass to HWND: {:?}",

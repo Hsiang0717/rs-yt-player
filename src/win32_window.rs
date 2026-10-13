@@ -4,7 +4,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GWL_EXSTYLE, GWL_STYLE, GetWindowLongPtrW, SIZE_MINIMIZED, SW_HIDE,
     SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, WM_SIZE, WM_SYSCOMMAND, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
-    WS_THICKFRAME,
 };
 use windows::core::w;
 use tracing::info;
@@ -57,10 +56,113 @@ pub fn set_taskbar_button(hwnd: HWND, visible: bool) {
     }
 }
 
+pub struct SingleInstanceGuard {
+    handle: windows::Win32::Foundation::HANDLE,
+}
+
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::CloseHandle;
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+pub fn wake_existing_instance() {
+    unsafe {
+        let hwnd = FindWindowW(None, *WINDOW_TITLE);
+        if hwnd.0 != 0 {
+            set_taskbar_button(hwnd, true);
+            let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_SHOW);
+            let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_RESTORE);
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+        }
+    }
+}
+
+pub fn acquire_single_instance() -> Option<SingleInstanceGuard> {
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::core::w;
+
+    unsafe {
+        let mutex_name = w!("Local\\YouTubeAudioPlayer_SingleInstance_Mutex");
+        let handle = CreateMutexW(None, true, mutex_name).ok()?;
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            info!("Another instance of YouTube Audio Player is already running. Focusing existing window.");
+            wake_existing_instance();
+            None
+        } else {
+            Some(SingleInstanceGuard { handle })
+        }
+    }
+}
+
+pub fn find_current_process_window() -> Option<HWND> {
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetClassNameW, GetWindowTextW, GetWindowThreadProcessId,
+    };
+
+    struct Context {
+        pid: u32,
+        found_hwnd: Option<HWND>,
+    }
+
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        unsafe {
+            let ctx = &mut *(lparam.0 as *mut Context);
+            let mut window_pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut window_pid));
+            if window_pid == ctx.pid {
+                let mut class_buf = [0u16; 64];
+                let class_len = GetClassNameW(hwnd, &mut class_buf);
+                let class_name = if class_len > 0 {
+                    String::from_utf16_lossy(&class_buf[..class_len as usize])
+                } else {
+                    String::new()
+                };
+
+                // Only hook the winit top-level window ("Window Class"), ignoring helper/IME/thread windows
+                if class_name == "Window Class" {
+                    let mut title_buf = [0u16; 128];
+                    let len = GetWindowTextW(hwnd, &mut title_buf);
+                    let title = if len > 0 {
+                        String::from_utf16_lossy(&title_buf[..len as usize])
+                    } else {
+                        String::new()
+                    };
+
+                    if title.contains("YouTube Audio Player") || ctx.found_hwnd.is_none() {
+                        ctx.found_hwnd = Some(hwnd);
+                        if title.contains("YouTube Audio Player") {
+                            return BOOL(0); // Exact title match found, stop enumeration
+                        }
+                    }
+                }
+            }
+            BOOL(1) // Continue
+        }
+    }
+
+    let mut ctx = Context {
+        pid: std::process::id(),
+        found_hwnd: None,
+    };
+
+    unsafe {
+        let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut Context as isize));
+    }
+
+    ctx.found_hwnd
+}
+
 pub unsafe fn attach_window_hooks(hwnd: HWND) {
     unsafe {
+        // Disable maximize box, keeping the resizable frame style
         let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        let fixed_style = style & !((WS_THICKFRAME.0 | WS_MAXIMIZEBOX.0) as isize);
+        let fixed_style = style & !(WS_MAXIMIZEBOX.0 as isize);
         let _ = SetWindowLongPtrW(hwnd, GWL_STYLE, fixed_style);
         let _ = SetWindowPos(
             hwnd,
@@ -77,8 +179,16 @@ pub unsafe fn attach_window_hooks(hwnd: HWND) {
 
 pub fn try_find_and_hook() -> Option<HWND> {
     unsafe {
-        let hwnd = FindWindowW(None, *WINDOW_TITLE);
-        if hwnd.0 != 0 {
+        let hwnd = find_current_process_window().or_else(|| {
+            let h = FindWindowW(None, *WINDOW_TITLE);
+            if h.0 != 0 {
+                Some(h)
+            } else {
+                None
+            }
+        });
+
+        if let Some(hwnd) = hwnd {
             attach_window_hooks(hwnd);
             Some(hwnd)
         } else {

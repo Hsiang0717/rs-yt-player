@@ -7,7 +7,7 @@ use souvlaki::MediaControlEvent;
 use tray_icon::TrayIconEvent;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
 };
 
 use crate::extractor::Extractor;
@@ -20,7 +20,7 @@ use crate::queue::PlayQueue;
 use crate::tray::SystemTray;
 use crate::ui_callbacks::PendingSeekState;
 use crate::ui_models::queue_items_model;
-use crate::win32_window::{attach_window_hooks, set_taskbar_button, WINDOW_TITLE};
+use crate::win32_window::{set_taskbar_button, try_find_and_hook};
 use crate::AppWindow;
 use slint::ComponentHandle;
 
@@ -70,16 +70,12 @@ pub fn start_playback_polling_timer(
             {
                 let mut guard = hwnd_for_timer.lock().unwrap();
                 if guard.is_none() {
-                    unsafe {
-                        let hwnd = FindWindowW(None, *WINDOW_TITLE);
-                        if hwnd.0 != 0 {
-                            attach_window_hooks(hwnd);
-                            info!(
-                                "Late-attached Win32 minimize-to-tray subclass to HWND: {:?}",
-                                hwnd
-                            );
-                            *guard = Some(hwnd);
-                        }
+                    if let Some(hwnd) = try_find_and_hook() {
+                        info!(
+                            "Late-attached Win32 minimize-to-tray subclass to HWND: {:?}",
+                            hwnd
+                        );
+                        *guard = Some(hwnd);
                     }
                 }
             }

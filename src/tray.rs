@@ -11,6 +11,12 @@ pub struct SystemTray {
 
 impl SystemTray {
     pub fn new() -> Result<Self> {
+        #[cfg(target_os = "windows")]
+        unsafe {
+            use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+
         // 1. Create a 32x32 colored RGBA icon in memory (indigo gradient circle)
         let icon = create_tray_icon(32, 32)?;
 

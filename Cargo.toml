@@ -25,7 +25,7 @@ tray-icon = "0.19"
 muda = "0.15"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 souvlaki = "0.7"
-windows = { version = "0.54", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Media_Control"] }
+windows = { version = "0.54", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_Com", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Media_Control"] }
 
 [build-dependencies]
 slint-build = "1.9"
