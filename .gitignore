@@ -3,3 +3,4 @@
 /dist
 bin/*.exe
 *.png
+*.log
