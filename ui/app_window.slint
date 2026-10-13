@@ -206,10 +206,10 @@ component LoadingSpinner {
 export component AppWindow inherits Window {
     title: "YouTube Audio Player";
     preferred-width: 540px;
-    preferred-height: root.queue_expanded ? 310px : 130px;
+    preferred-height: root.queue_expanded ? 360px : 130px;
     min-width: 500px;
     min-height: root.queue_expanded ? 310px : 130px;
-    max-height: root.queue_expanded ? 310px : 130px;
+    max-height: root.queue_expanded ? 100000px : 130px;
     background: #1F1D1B;
     default-font-family: "Segoe UI, sans-serif";
 
@@ -233,7 +233,7 @@ export component AppWindow inherits Window {
     // Visual Volume: Normalized 0.0 to 1.0
     in-out property <float> volume_ratio: 1.0;
     in-out property <bool> is_muted: false;
-    in-out property <bool> queue_expanded: true;
+    in-out property <bool> queue_expanded: false;
     in-out property <string> panel_tab: "QUEUE";
     in-out property <string> panel_message: "";
     in-out property <[TrackRow]> search_results: [];
@@ -377,22 +377,37 @@ export component AppWindow inherits Window {
                     }
 
                     queue_btn := Rectangle {
-                        width: 62px;
+                        width: 32px;
                         height: 30px;
                         background: queue_touch.has-hover ? #383430 : #2B2825;
                         border-width: 1px;
-                        border-color: #4E4740;
+                        border-color: root.queue_expanded ? #7FA09B : #4E4740;
                         border-radius: 4px;
 
-                        Text {
-                            text: root.queue_expanded ? "LIST ▲" : "LIST ▼";
-                            color: #E4DDD5;
-                            font-size: 9px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            width: 100%;
-                            height: 100%;
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 3px;
+                            padding-left: 8px;
+                            padding-right: 8px;
+
+                            Rectangle {
+                                width: 14px;
+                                height: 2px;
+                                background: root.queue_expanded ? #7FA09B : #E4DDD5;
+                                border-radius: 1px;
+                            }
+                            Rectangle {
+                                width: 14px;
+                                height: 2px;
+                                background: root.queue_expanded ? #7FA09B : #E4DDD5;
+                                border-radius: 1px;
+                            }
+                            Rectangle {
+                                width: 14px;
+                                height: 2px;
+                                background: root.queue_expanded ? #7FA09B : #E4DDD5;
+                                border-radius: 1px;
+                            }
                         }
 
                         queue_touch := TouchArea {
@@ -485,19 +500,18 @@ export component AppWindow inherits Window {
                         }
 
                         if root.is_loading: Rectangle {
-                            width: 44px;
+                            width: 20px;
                             height: 18px;
                             background: cancel_touch.has-hover ? #E09E8A : #D18D78;
                             border-radius: 3px;
-                            Text {
-                                text: "CANCEL";
-                                color: #1F1D1B;
-                                font-size: 8px;
-                                font-weight: 700;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                                width: 100%;
-                                height: 100%;
+                            Path {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                width: 10px;
+                                height: 10px;
+                                stroke: #1F1D1B;
+                                stroke-width: 1.8px;
+                                commands: "M 2 2 L 8 8 M 8 2 L 2 8";
                             }
                             cancel_touch := TouchArea {
                                 mouse-cursor: pointer;
@@ -506,19 +520,18 @@ export component AppWindow inherits Window {
                         }
 
                         if root.can_retry: Rectangle {
-                            width: 38px;
+                            width: 20px;
                             height: 18px;
                             background: retry_touch.has-hover ? #8EAEA9 : #7FA09B;
                             border-radius: 3px;
-                            Text {
-                                text: "RETRY";
-                                color: #1F1D1B;
-                                font-size: 8px;
-                                font-weight: 700;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                                width: 100%;
-                                height: 100%;
+                            Path {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                width: 10px;
+                                height: 10px;
+                                stroke: #1F1D1B;
+                                stroke-width: 1.5px;
+                                commands: "M 8.5 5 A 3.5 3.5 0 1 1 7.5 2.5 L 9.5 2.5 M 9.5 2.5 L 9.5 4.5";
                             }
                             retry_touch := TouchArea {
                                 mouse-cursor: pointer;
@@ -725,22 +738,40 @@ export component AppWindow inherits Window {
                     alignment: center;
 
                     Rectangle {
-                        width: 28px;
+                        width: 24px;
                         height: 20px;
                         background: mute_touch.has-hover ? #383430 : #2B2825;
                         border-radius: 3px;
                         border-width: 1px;
                         border-color: root.is_muted ? #C9B087 : #4E4740;
 
-                        Text {
-                            text: root.is_muted ? "MUTE" : "VOL";
-                            font-size: 8px;
-                            font-weight: 700;
-                            color: root.is_muted ? #C9B087 : #A39A8E;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            width: 100%;
-                            height: 100%;
+                        Path {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 12px;
+                            height: 12px;
+                            fill: root.is_muted ? #C9B087 : #A39A8E;
+                            commands: "M 1 4 L 3.5 4 L 7 1.5 L 7 10.5 L 3.5 8 L 1 8 Z";
+                        }
+
+                        if !root.is_muted && root.volume_ratio > 0.05: Path {
+                            x: (parent.width - self.width) / 2 + 3px;
+                            y: (parent.height - self.height) / 2;
+                            width: 6px;
+                            height: 12px;
+                            stroke: #A39A8E;
+                            stroke-width: 1.2px;
+                            commands: "M 1 4.5 A 2.5 2.5 0 0 1 1 7.5";
+                        }
+
+                        if root.is_muted: Path {
+                            x: (parent.width - self.width) / 2 + 3px;
+                            y: (parent.height - self.height) / 2;
+                            width: 6px;
+                            height: 12px;
+                            stroke: #C9B087;
+                            stroke-width: 1.5px;
+                            commands: "M 0 3.5 L 5 8.5 M 5 3.5 L 0 8.5";
                         }
 
                         mute_touch := TouchArea {
@@ -773,7 +804,7 @@ export component AppWindow inherits Window {
             x: 0px;
             y: 130px;
             width: 100%;
-            height: 180px;
+            height: parent.height - 130px;
             background: #262321;
 
             VerticalLayout {
@@ -813,20 +844,33 @@ export component AppWindow inherits Window {
                     Rectangle { horizontal-stretch: 1; }
 
                     Rectangle {
-                        width: 76px;
+                        width: 28px;
                         height: 24px;
                         background: #2B2825;
                         border-radius: 3px;
-                        Text {
-                            text: root.repeat_mode_label;
-                            color: #E4DDD5;
-                            font-size: 8px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            width: 100%;
-                            height: 100%;
+                        border-width: 1px;
+                        border-color: root.repeat_mode_label != "REPEAT OFF" ? #7FA09B : transparent;
+
+                        // Loop arrows icon
+                        Path {
+                            x: (parent.width - self.width) / 2 - (root.repeat_mode_label == "REPEAT ONE" ? 2px : 0px);
+                            y: (parent.height - self.height) / 2;
+                            width: 14px;
+                            height: 12px;
+                            stroke: root.repeat_mode_label != "REPEAT OFF" ? #7FA09B : #A39A8E;
+                            stroke-width: 1.4px;
+                            commands: "M 3 4 L 11 4 A 2.5 2.5 0 0 1 13.5 6.5 L 13.5 6.5 L 11.5 8.5 M 11 8 L 3 8 A 2.5 2.5 0 0 1 0.5 5.5 L 0.5 5.5 L 2.5 3.5";
                         }
+
+                        if root.repeat_mode_label == "REPEAT ONE": Text {
+                            x: 17px;
+                            y: 3px;
+                            text: "1";
+                            color: #7FA09B;
+                            font-size: 8px;
+                            font-weight: 800;
+                        }
+
                         TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.cycle_repeat_mode(); }
@@ -834,20 +878,24 @@ export component AppWindow inherits Window {
                     }
 
                     Rectangle {
-                        width: 62px;
+                        width: 28px;
                         height: 24px;
                         background: root.shuffle_enabled ? #3D3833 : #2B2825;
                         border-radius: 3px;
-                        Text {
-                            text: root.shuffle_enabled ? "SHUFFLE ON" : "SHUFFLE OFF";
-                            color: root.shuffle_enabled ? #92B7B1 : #A39A8E;
-                            font-size: 8px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            width: 100%;
-                            height: 100%;
+                        border-width: 1px;
+                        border-color: root.shuffle_enabled ? #7FA09B : transparent;
+
+                        // Crossing arrows shuffle icon
+                        Path {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 14px;
+                            height: 12px;
+                            stroke: root.shuffle_enabled ? #7FA09B : #A39A8E;
+                            stroke-width: 1.4px;
+                            commands: "M 1 2.5 L 5 2.5 L 9 9.5 L 13 9.5 M 10.5 7.5 L 13 9.5 L 10.5 11.5 M 1 9.5 L 5 9.5 L 6.5 6.8 M 7.5 5.2 L 9 2.5 L 13 2.5 M 10.5 0.5 L 13 2.5 L 10.5 4.5";
                         }
+
                         TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.toggle_shuffle(); }
@@ -855,20 +903,22 @@ export component AppWindow inherits Window {
                     }
 
                     if root.panel_tab == "QUEUE" && root.queue_items.length > 0: Rectangle {
-                        width: 50px;
+                        width: 28px;
                         height: 24px;
                         background: #3D3833;
                         border-radius: 3px;
-                        Text {
-                            text: "CLEAR";
-                            color: #D18D78;
-                            font-size: 8px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            width: 100%;
-                            height: 100%;
+
+                        // Trash can / Clear icon
+                        Path {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 12px;
+                            height: 12px;
+                            stroke: #D18D78;
+                            stroke-width: 1.3px;
+                            commands: "M 2 3 L 10 3 M 4.5 3 L 4.5 1.5 L 7.5 1.5 L 7.5 3 M 3 3 L 3.5 11 L 8.5 11 L 9 3";
                         }
+
                         TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.clear_queue(); }
@@ -939,16 +989,17 @@ export component AppWindow inherits Window {
                                 height: 26px;
                                 background: q_touch.has-hover ? #4E4740 : #383430;
                                 border-radius: 3px;
-                                Text {
-                                    text: "+Q";
-                                    color: #7FA09B;
-                                    font-size: 9px;
-                                    font-weight: 700;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    width: 100%;
-                                    height: 100%;
+
+                                Path {
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    width: 14px;
+                                    height: 12px;
+                                    stroke: #7FA09B;
+                                    stroke-width: 1.4px;
+                                    commands: "M 1 3 L 8 3 M 1 6 L 8 6 M 1 9 L 6 9 M 11 6 L 11 12 M 8 9 L 14 9";
                                 }
+
                                 q_touch := TouchArea {
                                     mouse-cursor: pointer;
                                     clicked => { root.enqueue_search_result(item.key); }
