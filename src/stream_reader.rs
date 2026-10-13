@@ -17,6 +17,46 @@ use tracing::debug;
 const DEFAULT_CHUNK_SIZE: usize = 512 * 1024; // 512 KB
 
 /// A stream reader that implements `Read + Seek` using HTTP Range requests.
+pub type UrlRefresher =
+    Arc<dyn Fn() -> anyhow::Result<(String, Option<HashMap<String, String>>)> + Send + Sync>;
+
+pub fn is_url_expired(url: &str) -> bool {
+    if let Some(pos) = url.find("expire=") {
+        let remainder = &url[pos + 7..];
+        let expire_str = remainder.split('&').next().unwrap_or("");
+        if let Ok(expire_ts) = expire_str.parse::<u64>() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            return now + 60 >= expire_ts;
+        }
+    }
+    false
+}
+
+fn build_blocking_client(
+    request_headers: Option<&HashMap<String, String>>,
+) -> std::io::Result<reqwest::blocking::Client> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(request_headers) = request_headers {
+        for (name, value) in request_headers {
+            let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
+            })?;
+            let value = reqwest::header::HeaderValue::from_str(value).map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
+            })?;
+            headers.insert(name, value);
+        }
+    }
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .default_headers(headers)
+        .build()
+        .map_err(std::io::Error::other)
+}
+
 #[allow(dead_code)]
 pub struct HttpStreamReader {
     client: reqwest::blocking::Client,
@@ -26,6 +66,8 @@ pub struct HttpStreamReader {
     buffer: Vec<u8>,
     buffer_start: u64,
     chunk_size: usize,
+    url_refresher: Option<UrlRefresher>,
+    request_headers: Option<HashMap<String, String>>,
 }
 
 #[allow(dead_code)]
@@ -46,24 +88,16 @@ impl HttpStreamReader {
         request_headers: Option<&HashMap<String, String>>,
         known_total_size: Option<u64>,
     ) -> std::io::Result<Self> {
-        let mut headers = reqwest::header::HeaderMap::new();
-        if let Some(request_headers) = request_headers {
-            for (name, value) in request_headers {
-                let name =
-                    reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
-                    })?;
-                let value = reqwest::header::HeaderValue::from_str(value).map_err(|error| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
-                })?;
-                headers.insert(name, value);
-            }
-        }
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .default_headers(headers)
-            .build()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        Self::new_with_headers_and_size_and_refresher(url, request_headers, known_total_size, None)
+    }
+
+    pub fn new_with_headers_and_size_and_refresher(
+        url: &str,
+        request_headers: Option<&HashMap<String, String>>,
+        known_total_size: Option<u64>,
+        url_refresher: Option<UrlRefresher>,
+    ) -> std::io::Result<Self> {
+        let client = build_blocking_client(request_headers)?;
 
         let total_size = if let Some(size) = known_total_size.filter(|&s| s > 0) {
             tracing::info!(
@@ -83,7 +117,7 @@ impl HttpStreamReader {
                 // Content-Range: bytes 0-0/12345678
                 if let Some(content_range) = resp.headers().get(reqwest::header::CONTENT_RANGE) {
                     let range_str = content_range.to_str().unwrap_or("");
-                    if let Some(total_str) = range_str.split('/').last() {
+                    if let Some(total_str) = range_str.split('/').next_back() {
                         total_str.trim().parse::<u64>().unwrap_or(0)
                     } else {
                         0
@@ -94,8 +128,7 @@ impl HttpStreamReader {
             } else if resp.status().is_success() {
                 resp.content_length().unwrap_or(0)
             } else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(std::io::Error::other(
                     format!("Failed to probe audio URL, status: {}", resp.status()),
                 ));
             };
@@ -123,6 +156,8 @@ impl HttpStreamReader {
             buffer: Vec::new(),
             buffer_start: 0,
             chunk_size: DEFAULT_CHUNK_SIZE,
+            url_refresher,
+            request_headers: request_headers.cloned(),
         };
 
         // Pre-fetch the first chunk
@@ -147,7 +182,22 @@ impl HttpStreamReader {
         let range_header = format!("bytes={}-{}", start, end);
         debug!("Fetching audio chunk: {}", range_header);
 
+        let mut refreshed_during_fetch = false;
         for attempt in 0..3 {
+            if !refreshed_during_fetch && is_url_expired(&self.url)
+                && let Some(refresher) = &self.url_refresher
+                    && let Ok((new_url, new_headers)) = refresher() {
+                        tracing::info!("Proactively refreshed expired YouTube stream URL before chunk fetch.");
+                        self.url = new_url;
+                        if let Some(headers) = new_headers {
+                            self.request_headers = Some(headers.clone());
+                            if let Ok(new_client) = build_blocking_client(Some(&headers)) {
+                                self.client = new_client;
+                            }
+                        }
+                        refreshed_during_fetch = true;
+                    }
+
             let response = match self
                 .client
                 .get(&self.url)
@@ -169,6 +219,25 @@ impl HttpStreamReader {
 
             if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
                 let status = response.status();
+                if (status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::GONE)
+                    && !refreshed_during_fetch
+                    && let Some(refresher) = &self.url_refresher
+                        && let Ok((new_url, new_headers)) = refresher() {
+                            tracing::info!(
+                                "Refreshed YouTube stream URL after receiving HTTP {}",
+                                status
+                            );
+                            self.url = new_url;
+                            if let Some(headers) = new_headers {
+                                self.request_headers = Some(headers.clone());
+                                if let Ok(new_client) = build_blocking_client(Some(&headers)) {
+                                    self.client = new_client;
+                                }
+                            }
+                            refreshed_during_fetch = true;
+                            continue;
+                        }
+
                 if attempt < 2
                     && (status.is_server_error()
                         || status == reqwest::StatusCode::TOO_MANY_REQUESTS)
@@ -176,8 +245,7 @@ impl HttpStreamReader {
                     std::thread::sleep(std::time::Duration::from_millis(250 * (attempt + 1)));
                     continue;
                 }
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(std::io::Error::other(
                     format!("HTTP range request was not honored (status: {})", status),
                 ));
             }
@@ -299,6 +367,8 @@ impl Seek for HttpStreamReader {
 
 const RANGE_READ_AHEAD_CAPACITY: usize = 8 * 1024 * 1024;
 
+pub const MAX_BYTE_CACHE_BYTES: usize = 32 * 1024 * 1024; // 32 MB capacity bound
+
 /// Sparse store of already-downloaded byte segments, shared across seeks of the same stream
 /// so that seeking into a previously downloaded region needs no new HTTP request.
 #[derive(Default)]
@@ -318,6 +388,10 @@ impl ByteCache {
         }
         let end = seg.len().min(offset + max);
         Some(seg[offset..end].to_vec())
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.segments.values().map(|s| s.len()).sum()
     }
 
     pub fn insert(&mut self, pos: u64, data: &[u8]) {
@@ -361,6 +435,38 @@ impl ByteCache {
                 _ => break,
             }
         }
+
+        // Enforce maximum memory bound for multi-hour audio
+        let mut total = self.total_bytes();
+        while total > MAX_BYTE_CACHE_BYTES && self.segments.len() > 1 {
+            let min_key = *self.segments.keys().next().unwrap();
+            let max_key = *self.segments.keys().next_back().unwrap();
+            let evict_key = if pos.abs_diff(min_key) >= pos.abs_diff(max_key) {
+                min_key
+            } else {
+                max_key
+            };
+            if let Some(removed) = self.segments.remove(&evict_key) {
+                total = total.saturating_sub(removed.len());
+            } else {
+                break;
+            }
+        }
+
+        if total > MAX_BYTE_CACHE_BYTES
+            && let Some((&first_key, seg)) = self.segments.iter_mut().next()
+                && seg.len() > MAX_BYTE_CACHE_BYTES {
+                    let excess = seg.len() - MAX_BYTE_CACHE_BYTES;
+                    if pos > first_key + excess as u64 {
+                        seg.drain(..excess);
+                        let new_key = first_key + excess as u64;
+                        let moved_seg = std::mem::take(seg);
+                        self.segments.remove(&first_key);
+                        self.segments.insert(new_key, moved_seg);
+                    } else {
+                        seg.truncate(MAX_BYTE_CACHE_BYTES);
+                    }
+                }
     }
 }
 
@@ -411,6 +517,7 @@ pub struct AsyncRangeMediaSource {
 }
 
 impl AsyncRangeMediaSource {
+    #[allow(dead_code)]
     pub fn new_with_headers(
         url: &str,
         request_headers: Option<&HashMap<String, String>>,
@@ -419,14 +526,29 @@ impl AsyncRangeMediaSource {
         Self::new_with_headers_and_size(url, request_headers, None, cache)
     }
 
+    #[allow(dead_code)]
     pub fn new_with_headers_and_size(
         url: &str,
         request_headers: Option<&HashMap<String, String>>,
         known_total_size: Option<u64>,
         cache: SharedByteCache,
     ) -> std::io::Result<Self> {
-        let reader =
-            HttpStreamReader::new_with_headers_and_size(url, request_headers, known_total_size)?;
+        Self::new_with_headers_and_size_and_refresher(url, request_headers, known_total_size, cache, None)
+    }
+
+    pub fn new_with_headers_and_size_and_refresher(
+        url: &str,
+        request_headers: Option<&HashMap<String, String>>,
+        known_total_size: Option<u64>,
+        cache: SharedByteCache,
+        url_refresher: Option<UrlRefresher>,
+    ) -> std::io::Result<Self> {
+        let reader = HttpStreamReader::new_with_headers_and_size_and_refresher(
+            url,
+            request_headers,
+            known_total_size,
+            url_refresher,
+        )?;
         let total_size = reader.total_size;
         let state = Arc::new((
             Mutex::new(RangeBufferState {
@@ -636,6 +758,33 @@ pub struct DecodedAudioSource {
     samples_to_skip: u64,
 }
 
+struct ProbeGateSource {
+    inner: Box<dyn MediaSource>,
+    allow_seek: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl MediaSource for ProbeGateSource {
+    fn is_seekable(&self) -> bool {
+        self.allow_seek.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.inner.byte_len()
+    }
+}
+
+impl Read for ProbeGateSource {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buffer)
+    }
+}
+
+impl Seek for ProbeGateSource {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(position)
+    }
+}
+
 impl DecodedAudioSource {
     pub fn new<R: Read + Send + 'static>(reader: R, start_offset_secs: f32) -> Result<Self> {
         let source = NonSeekableSource(Mutex::new(reader));
@@ -651,7 +800,16 @@ impl DecodedAudioSource {
         start_offset_secs: f32,
         seekable: bool,
     ) -> Result<Self> {
-        let stream = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
+        // Crucial optimization for multi-hour audio: keep is_seekable false during probe
+        // so Symphonia's ISOBMFF demuxer stops at the first fragment instead of issuing
+        // hundreds or thousands of HTTP Range seeks to scan all movie fragments across the file!
+        let allow_seek = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate_source = ProbeGateSource {
+            inner: source,
+            allow_seek: Arc::clone(&allow_seek),
+        };
+
+        let stream = MediaSourceStream::new(Box::new(gate_source), MediaSourceStreamOptions::default());
         let mut hint = Hint::new();
         hint.with_extension("m4a");
 
@@ -663,6 +821,11 @@ impl DecodedAudioSource {
                 &MetadataOptions::default(),
             )
             .context("Unable to identify the downloaded AAC audio stream")?;
+
+        if seekable {
+            allow_seek.store(true, std::sync::atomic::Ordering::Release);
+        }
+
         let mut format = probed.format;
         let track = format
             .default_track()

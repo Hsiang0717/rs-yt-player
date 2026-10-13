@@ -104,7 +104,7 @@ pub struct Extractor {
     yt_dlp_path: PathBuf,
 }
 
-fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+pub(crate) fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
     let mut cmd = Command::new(program);
     cmd.stdin(std::process::Stdio::null());
     #[cfg(windows)]
@@ -114,6 +114,48 @@ fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
+}
+
+pub(crate) fn extract_stream_url_sync(
+    yt_dlp_path: &std::path::Path,
+    query: &str,
+) -> Result<(String, Option<HashMap<String, String>>)> {
+    let is_url = query.starts_with("http://")
+        || query.starts_with("https://")
+        || query.starts_with("www.");
+    let target = if is_url {
+        query.to_string()
+    } else {
+        format!("ytsearch1:{}", query)
+    };
+
+    let output = silent_command(yt_dlp_path)
+        .args([
+            "--no-warnings",
+            "--no-playlist",
+            "-f",
+            "bestaudio[ext=m4a]",
+            "-j",
+            &target,
+        ])
+        .output()
+        .context("Failed to execute yt-dlp to refresh stream URL")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("yt-dlp stream refresh failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first_json_line = stdout
+        .lines()
+        .find(|line| line.starts_with('{') && line.ends_with('}'))
+        .ok_or_else(|| anyhow!("yt-dlp returned no valid JSON during stream refresh"))?;
+
+    let parsed: YtDlpOutput =
+        serde_json::from_str(first_json_line).context("Failed to parse yt-dlp JSON during stream refresh")?;
+
+    Ok((parsed.url, parsed.http_headers))
 }
 
 impl Extractor {
@@ -166,8 +208,8 @@ impl Extractor {
     /// Check if yt-dlp is available in PATH or project bin dir; if not, download it.
     async fn ensure_yt_dlp() -> Result<PathBuf> {
         // 1. Check if yt-dlp is already in PATH
-        if let Ok(output) = silent_command("where.exe").arg("yt-dlp").output() {
-            if output.status.success() {
+        if let Ok(output) = silent_command("where.exe").arg("yt-dlp").output()
+            && output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 if let Some(first_line) = stdout.lines().next() {
                     let path = PathBuf::from(first_line.trim());
@@ -177,11 +219,10 @@ impl Extractor {
                     }
                 }
             }
-        }
 
         // 2. Check executable directory and local ./bin/yt-dlp.exe
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
+        if let Ok(exe_path) = std::env::current_exe()
+            && let Some(exe_dir) = exe_path.parent() {
                 let candidate1 = exe_dir.join("bin").join("yt-dlp.exe");
                 if candidate1.exists() {
                     info!("Found yt-dlp near executable: {:?}", candidate1);
@@ -193,7 +234,6 @@ impl Extractor {
                     return Ok(candidate2);
                 }
             }
-        }
 
         let local_bin = PathBuf::from("bin").join("yt-dlp.exe");
         if local_bin.exists() {

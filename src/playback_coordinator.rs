@@ -61,7 +61,9 @@ pub async fn play_with_metadata(
 
     // Start streaming the selected AAC format through Symphonia.
     let stream_url = meta.stream_url.clone();
+    let query_for_player = query_str.clone();
     let play_res = tokio::task::spawn_blocking(move || {
+        player.set_current_query(Some(query_for_player));
         player.play_stream_from_with_headers(
             &stream_url,
             request_headers,
@@ -83,8 +85,8 @@ pub async fn play_with_metadata(
     }
 
     // Update Windows SMTC if available
-    if let Some(smtc_arc) = &smtc {
-        if let Ok(mut lock) = smtc_arc.lock() {
+    if let Some(smtc_arc) = &smtc
+        && let Ok(mut lock) = smtc_arc.lock() {
             lock.0.set_metadata(
                 &title,
                 &uploader,
@@ -96,7 +98,6 @@ pub async fn play_with_metadata(
             );
             lock.0.set_playback(playback_succeeded);
         }
-    }
 
     let queue_for_ui = queue.clone();
     let library_for_ui = library.clone();
@@ -218,11 +219,10 @@ pub async fn play_track(
             }
         };
         info!("Extracted {} items", items.len());
-        if let Some(video_id) = requested_video_id(&query_str) {
-            if let Some(selected_index) = items.iter().position(|item| item.id == video_id) {
+        if let Some(video_id) = requested_video_id(&query_str)
+            && let Some(selected_index) = items.iter().position(|item| item.id == video_id) {
                 items.rotate_left(selected_index);
             }
-        }
         if let Some(first) = queue.load_playlist(items) {
             target_query = first;
         }
@@ -250,18 +250,15 @@ pub async fn play_track(
             let temp_cover_path = std::env::temp_dir().join(format!("rs_yt_cover_{}.png", meta.id));
             if let Some(thumb_url) = &meta.thumbnail {
                 let client = reqwest::Client::new();
-                if let Ok(resp) = client.get(thumb_url).send().await {
-                    if let Ok(bytes) = resp.bytes().await {
-                        if let Ok(dynamic_img) = image::load_from_memory(&bytes) {
-                            if dynamic_img
+                if let Ok(resp) = client.get(thumb_url).send().await
+                    && let Ok(bytes) = resp.bytes().await
+                        && let Ok(dynamic_img) = image::load_from_memory(&bytes)
+                            && dynamic_img
                                 .save_with_format(&temp_cover_path, image::ImageFormat::Png)
                                 .is_ok()
                             {
                                 cover_path = Some(temp_cover_path);
                             }
-                        }
-                    }
-                }
             }
             play_with_metadata(
                 target_query,
@@ -311,8 +308,8 @@ pub fn trigger_next(
     }
     *advancing = true;
 
-    if natural_end && queue.repeat_mode() == RepeatMode::One {
-        if let Some(current) = queue.current_query() {
+    if natural_end && queue.repeat_mode() == RepeatMode::One
+        && let Some(current) = queue.current_query() {
             let adv_lock = Arc::clone(&is_advancing);
             let abort_handle = loading_abort.clone();
             let join_handle = tokio::spawn(async move {
@@ -324,14 +321,12 @@ pub fn trigger_next(
                     *guard = false;
                 }
             });
-            if let Ok(mut guard) = abort_handle.lock() {
-                if let Some(prev) = guard.replace(join_handle.abort_handle()) {
+            if let Ok(mut guard) = abort_handle.lock()
+                && let Some(prev) = guard.replace(join_handle.abort_handle()) {
                     prev.abort();
                 }
-            }
             return;
         }
-    }
 
     if let Some((next_query, maybe_preloaded)) = queue.pop_next() {
         info!("Advancing to next track in queue: {}", next_query);
@@ -344,13 +339,11 @@ pub fn trigger_next(
                     preloaded.meta.title
                 );
                 let cache_path = library.cover_path(&preloaded.meta.id);
-                if !cache_path.exists() {
-                    if let Some(path) = &preloaded.cover_path {
-                        if let Ok(bytes) = std::fs::read(path) {
+                if !cache_path.exists()
+                    && let Some(path) = &preloaded.cover_path
+                        && let Ok(bytes) = std::fs::read(path) {
                             let _ = library.store_cover(&preloaded.meta.id, &bytes);
                         }
-                    }
-                }
                 let cover_path = cache_path
                     .exists()
                     .then_some(cache_path)
@@ -378,11 +371,10 @@ pub fn trigger_next(
                 *guard = false;
             }
         });
-        if let Ok(mut guard) = abort_handle.lock() {
-            if let Some(prev) = guard.replace(join_handle.abort_handle()) {
+        if let Ok(mut guard) = abort_handle.lock()
+            && let Some(prev) = guard.replace(join_handle.abort_handle()) {
                 prev.abort();
             }
-        }
     } else {
         *advancing = false;
         info!("Next track requested, but queue is empty.");
@@ -421,20 +413,18 @@ pub fn trigger_previous(
                 *guard = false;
             }
         });
-        if let Ok(mut guard) = abort_handle.lock() {
-            if let Some(prev) = guard.replace(join_handle.abort_handle()) {
+        if let Ok(mut guard) = abort_handle.lock()
+            && let Some(prev) = guard.replace(join_handle.abort_handle()) {
                 prev.abort();
             }
-        }
     } else {
         *advancing = false;
         info!("No previous track in history; seeking to beginning.");
         let _ = player.seek_to(0.0);
-        if let Some(smtc_arc) = &smtc {
-            if let Ok(mut lock) = smtc_arc.lock() {
+        if let Some(smtc_arc) = &smtc
+            && let Ok(mut lock) = smtc_arc.lock() {
                 lock.0.set_playback(true);
             }
-        }
         if let Some(ui) = ui_weak.upgrade() {
             ui.set_progress_ratio(0.0);
         }
@@ -463,9 +453,8 @@ pub fn start_track_playback(
         )
         .await;
     });
-    if let Ok(mut guard) = loading_abort.lock() {
-        if let Some(prev) = guard.replace(join_handle.abort_handle()) {
+    if let Ok(mut guard) = loading_abort.lock()
+        && let Some(prev) = guard.replace(join_handle.abort_handle()) {
             prev.abort();
         }
-    }
 }

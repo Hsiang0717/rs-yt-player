@@ -1,6 +1,7 @@
 use crate::buffer::{BufferStats, DEFAULT_BUFFER_CAPACITY, TrackedAudioBuffer};
 use crate::stream_reader::{
-    AsyncRangeMediaSource, ByteCache, DecodedAudioSource, RangeBufferStats, SharedByteCache,
+    is_url_expired, AsyncRangeMediaSource, ByteCache, DecodedAudioSource, RangeBufferStats,
+    SharedByteCache, UrlRefresher,
 };
 use anyhow::{Context, Result};
 use rodio::{OutputStreamHandle, Sink};
@@ -75,6 +76,7 @@ pub struct AudioPlayer {
     current_process: Arc<Mutex<Option<Child>>>,
     current_stream_url: Arc<Mutex<Option<String>>>,
     current_stream_headers: Arc<Mutex<Option<HashMap<String, String>>>>,
+    current_query: Arc<Mutex<Option<String>>>,
     timing: Arc<Mutex<PlaybackTiming>>,
     buffer_stats: Arc<Mutex<Option<BufferStats>>>,
     range_buffer_stats: Arc<Mutex<Option<RangeBufferStats>>>,
@@ -96,6 +98,7 @@ impl AudioPlayer {
             current_process: Arc::new(Mutex::new(None)),
             current_stream_url: Arc::new(Mutex::new(None)),
             current_stream_headers: Arc::new(Mutex::new(None)),
+            current_query: Arc::new(Mutex::new(None)),
             timing: Arc::new(Mutex::new(PlaybackTiming {
                 base_offset_secs: 0.0,
                 start_instant: None,
@@ -109,14 +112,26 @@ impl AudioPlayer {
         })
     }
 
+    pub fn set_current_query(&self, query: Option<String>) {
+        *self.current_query.lock().unwrap() = query;
+    }
+
+    fn create_url_refresher(&self) -> Option<UrlRefresher> {
+        let yt_dlp = self.yt_dlp_path.clone();
+        let query_opt = self.current_query.lock().unwrap().clone();
+        query_opt.map(|query| {
+            Arc::new(move || crate::extractor::extract_stream_url_sync(&yt_dlp, &query))
+                as UrlRefresher
+        })
+    }
+
     /// Returns the downloaded-bytes cache for this URL, creating a fresh one when the URL changes.
     fn byte_cache_for(&self, url: &str) -> SharedByteCache {
         let mut guard = self.byte_cache.lock().unwrap();
-        if let Some((cached_url, cache)) = guard.as_ref() {
-            if cached_url == url {
+        if let Some((cached_url, cache)) = guard.as_ref()
+            && cached_url == url {
                 return Arc::clone(cache);
             }
-        }
         let cache: SharedByteCache = Arc::new(Mutex::new(ByteCache::default()));
         *guard = Some((url.to_string(), Arc::clone(&cache)));
         cache
@@ -156,10 +171,13 @@ impl AudioPlayer {
         // Prefer a seekable HTTP source for both normal playback and long-offset starts.
         // Besides making seeks cheap, this avoids depending on MP4 pipe probing for long media.
         let byte_cache = self.byte_cache_for(stream_url);
-        let range_result = AsyncRangeMediaSource::new_with_headers(
+        let refresher = self.create_url_refresher();
+        let range_result = AsyncRangeMediaSource::new_with_headers_and_size_and_refresher(
             stream_url,
             request_headers.as_ref(),
+            None,
             byte_cache,
+            refresher,
         )
         .context("Failed to open the AAC stream with HTTP Range requests")
         .and_then(|range_source| {
@@ -233,11 +251,13 @@ impl AudioPlayer {
         );
 
         let byte_cache = self.byte_cache_for(stream_url);
-        let range_result = AsyncRangeMediaSource::new_with_headers_and_size(
+        let refresher = self.create_url_refresher();
+        let range_result = AsyncRangeMediaSource::new_with_headers_and_size_and_refresher(
             stream_url,
             request_headers.as_ref(),
             known_total_size,
             byte_cache,
+            refresher,
         )
         .context("Failed to open the AAC stream with HTTP Range requests")
         .and_then(|range_source| {
@@ -330,6 +350,33 @@ impl AudioPlayer {
     }
 
     pub fn resume(&self) {
+        let is_expired = self
+            .current_stream_url
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(is_url_expired)
+            .unwrap_or(false);
+
+        if is_expired {
+            let query_opt = self.current_query.lock().unwrap().clone();
+            if let Some(query) = query_opt
+                && let Ok((new_url, new_headers)) =
+                    crate::extractor::extract_stream_url_sync(&self.yt_dlp_path, &query)
+                {
+                    info!(
+                        "Proactively refreshed expired YouTube stream URL on resume; continuing playback."
+                    );
+                    let current_pos = self.current_position();
+                    let total_dur = self.total_duration();
+                    if let Ok(()) =
+                        self.seek_stream_to(&new_url, new_headers, None, current_pos, total_dur)
+                    {
+                        return;
+                    }
+                }
+        }
+
         self.sink.lock().unwrap().play();
         let mut timing = self.timing.lock().unwrap();
         timing.start_instant = Some(Instant::now());
@@ -338,12 +385,11 @@ impl AudioPlayer {
     }
 
     pub fn stop(&self) {
-        if let Ok(mut proc_lock) = self.current_process.lock() {
-            if let Some(mut child) = proc_lock.take() {
+        if let Ok(mut proc_lock) = self.current_process.lock()
+            && let Some(mut child) = proc_lock.take() {
                 let _ = child.kill();
                 let _ = child.wait();
             }
-        }
         if let Ok(sink_lock) = self.sink.lock() {
             sink_lock.clear();
         }
