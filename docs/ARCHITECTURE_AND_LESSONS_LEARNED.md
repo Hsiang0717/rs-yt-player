@@ -167,6 +167,17 @@ Windows Shell (`ShellExperienceHost.exe`) 在渲染 SMTC 視窗時，依循以�
 *   YouTube 網址的 `t=`, `start=` 或 `time_continue=` 會作為起播秒數；Range 可用時，長影片可直接跳到目標範圍，不必從開頭解碼數小時的音訊。playlist radio URL 會優先從 `v=` 指定的歌曲開始。
 *   `AudioPlayer::stop()` 會結束回退路徑的 yt-dlp 子程序、通知 Range 預取停止並清空音訊緩衝。自動切歌會等音訊來源結束，不會只依賴影片時長估算。
 
+### 4.3 長音訊、記憶體上限與 URL 自動刷新最佳化 (Long-Stream Architecture)
+在處理 2 至 10 小時以上的長篇 YouTube 音訊（如廣播、白噪音、完整專輯合輯）時，純 Range 串流面臨三大技術痛點與實作方案：
+1.  **Symphonia Probe 門控起播 (`ProbeGateSource`)**：
+    - *問題*：Symphonia 的 ISOBMFF / MP4 Demuxer 若發現資料來源支援 `is_seekable() == true`，在呼叫 `probe()` 階段會嘗試 seek 遍歷整個長檔案的所有 Movie Fragments (`moof`)，導致剛起播就引發數百次額外的 HTTP Range 請求，起播嚴重延遲甚至掛起。
+    - *解決*：實作 `ProbeGateSource` 裝飾器。在 `probe()` 階段透過原子標誌強制回報 `is_seekable() == false`，讓 Demuxer 讀取第一個 fragment 後立即完成 probe。探測成功後再解鎖 seek 能力，起播速度大幅提升至毫秒級。
+2.  **稀疏分段快取記憶體上限 (`ByteCache` 32MB Memory Bound)**：
+    - *問題*：預設快取所有已下載 byte ranges 以加速 seek 重用，但在播放多小時檔案時，記憶體會隨播放持續累積數百 MB。
+    - *解決*：設定 `MAX_BYTE_CACHE_BYTES = 32 * 1024 * 1024`。當插入新區塊導致總位元組超額時，以目前播放位置 `pos` 為中心，優先淘汰距離最遠的區段（頭端或尾端），確保高覆蓋率的同時將常駐記憶體嚴格封頂在 32MB 內。
+3.  **YouTube CDN 直鏈過期背景自動刷新 (`UrlRefresher`)**：
+    - *問題*：Google 串流 URL 帶有 `expire` 時間戳（通常為 6 小時），長時間播放或暫停後恢復時常遇到 HTTP 403 Forbidden 或 410 Gone。
+    - *解決*：串流讀取層注入 `UrlRefresher` 回呼。在發送 chunk 請求前主動檢查 URL 是否即將過期，或在收到 403/410 時自動重新以 yt-dlp 解析新直鏈並置換 HTTP Client，達到完全透明無感的斷點續播。
 
 ---
 

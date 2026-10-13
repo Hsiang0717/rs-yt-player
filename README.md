@@ -7,7 +7,8 @@
 ## ✨ 核心特色
 
 1. **純音訊串流（天然零廣告）**：
-   - 透過 yt-dlp 取得 YouTube AAC/M4A 音訊網址，再優先以 HTTP Range 分段讀取；使用 Symphonia 內建解碼器播放，不需要 ffmpeg。
+   - 透過 yt-dlp 取得 YouTube AAC/M4A 音訊網址，優先以 HTTP Range 分段讀取；使用 Symphonia 內建解碼器播放，不需要 ffmpeg。
+   - 具備 **長音訊最佳化**：Symphonia Probe 門控毫秒起播、32MB 稀疏區塊快取上限防記憶體膨脹，以及過期 URL (403/410) 背景自動刷新續播機制。
 2. **Morandi Warm Oat 橫向面板 UI**：
    - 採用終端機專屬 **Morandi Warm Oat** 莫蘭迪暖調配色（深褐 `#1F1D1B`、燕麥卡片 `#2B2825`、米白 `#E4DDD5`、灰青綠 `#7FA09B`）。
    - **橫向迷你面板 (Horizontal Bar Layout)**，無任何 Emoji，採用極簡專業純英文字標（`PLAY`, `PAUSE`, `STOP`, `MINIMIZE TO TRAY`, `VOL`）。
