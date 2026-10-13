@@ -78,10 +78,11 @@ async fn main() -> Result<()> {
     app.set_history_items(records_model(library.recent(), &library));
     app.set_queue_items(queue_items_model(&play_queue, &library));
 
-    // Initialize System Tray
+    // Initialize System Tray (kept on main thread event loop)
     let tray = match SystemTray::new() {
         Ok(t) => {
             info!("System Tray icon initialized successfully.");
+            #[allow(clippy::arc_with_non_send_sync)]
             Some(Arc::new(t))
         }
         Err(e) => {

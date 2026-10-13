@@ -9,29 +9,27 @@ pub async fn run_cli_mode(raw_args: Vec<String>, is_smoke_test: bool) -> Result<
         #[cfg(target_os = "windows")]
         {
             use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
-            if let Ok(op) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
-                if let Ok(mgr) = op.get() {
+            if let Ok(op) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+                && let Ok(mgr) = op.get() {
                     if let Ok(s) = mgr.GetCurrentSession() {
                         if let Ok(app_id) = s.SourceAppUserModelId() {
                             println!(
                                 "Current Active SMTC Session SourceAppUserModelId: {}",
                                 app_id
                             );
-                            if let Ok(info_op) = s.TryGetMediaPropertiesAsync() {
-                                if let Ok(props) = info_op.get() {
+                            if let Ok(info_op) = s.TryGetMediaPropertiesAsync()
+                                && let Ok(props) = info_op.get() {
                                     let title =
                                         props.Title().map(|t| t.to_string()).unwrap_or_default();
                                     let artist =
                                         props.Artist().map(|a| a.to_string()).unwrap_or_default();
                                     println!(" -> Title: '{}', Artist: '{}'", title, artist);
                                 }
-                            }
                         }
                     } else {
                         println!("No active SMTC session currently playing.");
                     }
                 }
-            }
         }
         return Ok(());
     }
@@ -126,16 +124,16 @@ pub async fn run_cli_mode(raw_args: Vec<String>, is_smoke_test: bool) -> Result<
         #[cfg(target_os = "windows")]
         {
             use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
-            if let Ok(op) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
-                if let Ok(mgr) = op.get() {
-                    if let Ok(s) = mgr.GetCurrentSession() {
-                        if let Ok(app_id) = s.SourceAppUserModelId() {
+            if let Ok(op) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+                && let Ok(mgr) = op.get()
+                    && let Ok(s) = mgr.GetCurrentSession()
+                        && let Ok(app_id) = s.SourceAppUserModelId() {
                             println!(
                                 "Empirical SMTC Verification: Active Session SourceAppUserModelId: {}",
                                 app_id
                             );
-                            if let Ok(info_op) = s.TryGetMediaPropertiesAsync() {
-                                if let Ok(props) = info_op.get() {
+                            if let Ok(info_op) = s.TryGetMediaPropertiesAsync()
+                                && let Ok(props) = info_op.get() {
                                     let title =
                                         props.Title().map(|t| t.to_string()).unwrap_or_default();
                                     let artist =
@@ -145,11 +143,7 @@ pub async fn run_cli_mode(raw_args: Vec<String>, is_smoke_test: bool) -> Result<
                                         title, artist
                                     );
                                 }
-                            }
                         }
-                    }
-                }
-            }
         }
 
         tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;

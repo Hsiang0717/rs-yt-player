@@ -127,15 +127,12 @@ pub async fn cache_track_cover(client: reqwest::Client, library: LibraryStore, t
     let Some(url) = track.thumbnail_url else {
         return;
     };
-    if let Ok(response) = client.get(url).send().await {
-        if response.status().is_success() {
-            if let Ok(bytes) = response.bytes().await {
-                if let Err(error) = library.store_cover(&track.id, &bytes) {
+    if let Ok(response) = client.get(url).send().await
+        && response.status().is_success()
+            && let Ok(bytes) = response.bytes().await
+                && let Err(error) = library.store_cover(&track.id, &bytes) {
                     info!("Could not cache cover art: {:#}", error);
                 }
-            }
-        }
-    }
 }
 
 pub fn is_url(query: &str) -> bool {

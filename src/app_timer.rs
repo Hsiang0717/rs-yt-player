@@ -122,28 +122,25 @@ pub fn start_playback_polling_timer(
 
             // 2. Process Tray Icon Double-Click (Directly Restore window from tray)
             while let Ok(tray_event) = TrayIconEvent::receiver().try_recv() {
-                match tray_event {
-                    TrayIconEvent::DoubleClick { .. } => {
-                        info!("Tray double-clicked: Restoring main window.");
-                        if let Some(hwnd) = *hwnd_for_timer.lock().unwrap() {
-                            unsafe {
-                                set_taskbar_button(hwnd, true);
-                                let _ = ShowWindow(hwnd, SW_SHOW);
-                                let _ = ShowWindow(hwnd, SW_RESTORE);
-                                let _ = SetForegroundWindow(hwnd);
-                            }
-                        }
-                        if let Some(ui) = ui_weak_timer.upgrade() {
-                            let _ = ui.show();
+                if let TrayIconEvent::DoubleClick { .. } = tray_event {
+                    info!("Tray double-clicked: Restoring main window.");
+                    if let Some(hwnd) = *hwnd_for_timer.lock().unwrap() {
+                        unsafe {
+                            set_taskbar_button(hwnd, true);
+                            let _ = ShowWindow(hwnd, SW_SHOW);
+                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                            let _ = SetForegroundWindow(hwnd);
                         }
                     }
-                    _ => {}
+                    if let Some(ui) = ui_weak_timer.upgrade() {
+                        let _ = ui.show();
+                    }
                 }
             }
 
             // 3. Process Windows SMTC Media Key Events
-            if let Some(smtc_arc) = &smtc_clone {
-                if let Ok(mut lock) = smtc_arc.try_lock() {
+            if let Some(smtc_arc) = &smtc_clone
+                && let Ok(mut lock) = smtc_arc.try_lock() {
                     while let Ok(event) = lock.1.try_recv() {
                         match event {
                             MediaControlEvent::Play => {
@@ -218,7 +215,6 @@ pub fn start_playback_polling_timer(
                         }
                     }
                 }
-            }
 
             // 4. Update Playback Progress Bar (Only when user is NOT dragging)
             if !player_for_timer.is_paused() {
@@ -236,11 +232,10 @@ pub fn start_playback_polling_timer(
                                 stream_error
                             )));
                         }
-                        if let Some(smtc_arc) = &smtc_clone {
-                            if let Ok(mut lock) = smtc_arc.lock() {
+                        if let Some(smtc_arc) = &smtc_clone
+                            && let Ok(mut lock) = smtc_arc.lock() {
                                 lock.0.set_playback(false);
                             }
-                        }
                     }
                 } else {
                     stream_error_displayed = false;
@@ -258,15 +253,14 @@ pub fn start_playback_polling_timer(
                         }
                     };
 
-                    if let Some(ui) = ui_weak_timer.upgrade() {
-                        if ui.get_has_active_track() {
+                    if let Some(ui) = ui_weak_timer.upgrade()
+                        && ui.get_has_active_track() {
                             if player_for_timer.is_buffering() || is_pending_seek {
                                 ui.set_track_status(slint::SharedString::from("BUFFERING"));
                             } else if ui.get_track_status() == "BUFFERING" {
                                 ui.set_track_status(slint::SharedString::from("PLAYING"));
                             }
                         }
-                    }
                 }
 
                 let is_pending_seek = {
@@ -285,8 +279,8 @@ pub fn start_playback_polling_timer(
 
                 let current_pos = player_for_timer.current_position();
                 let total_dur = player_for_timer.total_duration();
-                if total_dur > 0.0 {
-                    if let Some(ui) = ui_weak_timer.upgrade() {
+                if total_dur > 0.0
+                    && let Some(ui) = ui_weak_timer.upgrade() {
                         if !ui.get_is_scrubbing() && !is_pending_seek {
                             let ratio = (current_pos / total_dur).clamp(0.0, 1.0);
                             ui.set_progress_ratio(ratio);
@@ -306,7 +300,6 @@ pub fn start_playback_polling_timer(
                             ui.set_buffer_ratio(buf_ratio);
                         }
                     }
-                }
 
                 // 5. Gapless Preload: Pre-fetch next track when <= 10s remaining
                 if total_dur > 15.0 && (total_dur - current_pos) <= 10.0 {

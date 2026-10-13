@@ -476,12 +476,11 @@ pub fn register_ui_callbacks(
     let library_for_remove = library.clone();
     let ui_weak_remove = app.as_weak();
     app.on_remove_queue_item(move |index| {
-        if queue_for_remove.remove_at(index as usize).is_some() {
-            if let Some(ui) = ui_weak_remove.upgrade() {
+        if queue_for_remove.remove_at(index as usize).is_some()
+            && let Some(ui) = ui_weak_remove.upgrade() {
                 ui.set_queue_items(queue_items_model(&queue_for_remove, &library_for_remove));
                 ui.set_panel_message(slint::SharedString::from("Removed from queue"));
             }
-        }
     });
 
     let queue_for_move_up = play_queue.clone();
@@ -489,11 +488,10 @@ pub fn register_ui_callbacks(
     let ui_weak_move_up = app.as_weak();
     app.on_move_queue_item_up(move |index| {
         let index = index as usize;
-        if index > 0 && queue_for_move_up.move_item(index, index - 1) {
-            if let Some(ui) = ui_weak_move_up.upgrade() {
+        if index > 0 && queue_for_move_up.move_item(index, index - 1)
+            && let Some(ui) = ui_weak_move_up.upgrade() {
                 ui.set_queue_items(queue_items_model(&queue_for_move_up, &library_for_move_up));
             }
-        }
     });
 
     let queue_for_move_down = play_queue.clone();
@@ -501,14 +499,13 @@ pub fn register_ui_callbacks(
     let ui_weak_move_down = app.as_weak();
     app.on_move_queue_item_down(move |index| {
         let index = index as usize;
-        if queue_for_move_down.move_item(index, index + 1) {
-            if let Some(ui) = ui_weak_move_down.upgrade() {
+        if queue_for_move_down.move_item(index, index + 1)
+            && let Some(ui) = ui_weak_move_down.upgrade() {
                 ui.set_queue_items(queue_items_model(
                     &queue_for_move_down,
                     &library_for_move_down,
                 ));
             }
-        }
     });
 
     let queue_for_clear = play_queue.clone();
@@ -559,13 +556,11 @@ pub fn register_ui_callbacks(
         let join_handle = tokio::spawn(async move {
             if let Some(preloaded) = preloaded {
                 let cache_path = library.cover_path(&preloaded.meta.id);
-                if !cache_path.exists() {
-                    if let Some(path) = &preloaded.cover_path {
-                        if let Ok(bytes) = std::fs::read(path) {
+                if !cache_path.exists()
+                    && let Some(path) = &preloaded.cover_path
+                        && let Ok(bytes) = std::fs::read(path) {
                             let _ = library.store_cover(&preloaded.meta.id, &bytes);
                         }
-                    }
-                }
                 let cover_path = cache_path
                     .exists()
                     .then_some(cache_path)
@@ -591,11 +586,10 @@ pub fn register_ui_callbacks(
             }
             *advance.lock().unwrap() = false;
         });
-        if let Ok(mut guard) = abort_handle.lock() {
-            if let Some(prev) = guard.replace(join_handle.abort_handle()) {
+        if let Ok(mut guard) = abort_handle.lock()
+            && let Some(prev) = guard.replace(join_handle.abort_handle()) {
                 prev.abort();
             }
-        }
     });
 
     // --- 7. Playback Control Callbacks ---
@@ -611,11 +605,10 @@ pub fn register_ui_callbacks(
             player.pause();
         }
 
-        if let Some(smtc_arc) = &smtc_for_toggle {
-            if let Ok(mut lock) = smtc_arc.lock() {
+        if let Some(smtc_arc) = &smtc_for_toggle
+            && let Ok(mut lock) = smtc_arc.lock() {
                 lock.0.set_playback(is_paused);
             }
-        }
 
         if let Some(ui) = ui_weak_toggle.upgrade() {
             ui.set_is_playing(is_paused);
@@ -678,12 +671,11 @@ pub fn register_ui_callbacks(
     let ui_weak_cancel = app.as_weak();
     let advance_for_cancel = Arc::clone(&is_auto_advancing);
     app.on_cancel_loading(move || {
-        if let Ok(mut guard) = loading_abort_for_cancel.lock() {
-            if let Some(handle) = guard.take() {
+        if let Ok(mut guard) = loading_abort_for_cancel.lock()
+            && let Some(handle) = guard.take() {
                 handle.abort();
                 info!("Active loading task was aborted by user.");
             }
-        }
         if let Ok(mut advancing) = advance_for_cancel.lock() {
             *advancing = false;
         }
@@ -704,18 +696,16 @@ pub fn register_ui_callbacks(
     let library_for_stop = library.clone();
     let loading_abort_for_stop = Arc::clone(&current_loading_abort);
     app.on_stop(move || {
-        if let Ok(mut guard) = loading_abort_for_stop.lock() {
-            if let Some(handle) = guard.take() {
+        if let Ok(mut guard) = loading_abort_for_stop.lock()
+            && let Some(handle) = guard.take() {
                 handle.abort();
             }
-        }
         player_for_stop.stop();
         queue_for_stop.clear();
-        if let Some(smtc_arc) = &smtc_for_stop {
-            if let Ok(mut lock) = smtc_arc.lock() {
+        if let Some(smtc_arc) = &smtc_for_stop
+            && let Ok(mut lock) = smtc_arc.lock() {
                 lock.0.set_playback(false);
             }
-        }
         if let Some(ui) = ui_weak_stop.upgrade() {
             ui.set_queue_items(queue_items_model(&queue_for_stop, &library_for_stop));
             ui.set_is_playing(false);
@@ -805,18 +795,16 @@ pub fn register_ui_callbacks(
                         ui.set_is_playing(true);
                         ui.set_track_status(slint::SharedString::from("PLAYING"));
                     }
-                    if let Some(smtc_arc) = &smtc {
-                        if let Ok(mut lock) = smtc_arc.lock() {
+                    if let Some(smtc_arc) = &smtc
+                        && let Ok(mut lock) = smtc_arc.lock() {
                             lock.0.set_playback(true);
                         }
-                    }
                 }
                 let mut lock = pending_seek.lock().unwrap();
-                if let Some(p) = lock.as_ref() {
-                    if p.id == current_seq {
+                if let Some(p) = lock.as_ref()
+                    && p.id == current_seq {
                         *lock = None;
                     }
-                }
             }
         });
     });

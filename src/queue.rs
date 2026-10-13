@@ -84,11 +84,10 @@ impl PlayQueue {
         let current = self.current.lock().unwrap().clone();
         {
             let mut cycle = self.repeat_cycle.lock().unwrap();
-            if cycle.is_empty() {
-                if let Some(current) = current {
+            if cycle.is_empty()
+                && let Some(current) = current {
                     cycle.push(current);
                 }
-            }
             cycle.push(item.clone());
         }
         self.inner.lock().unwrap().push_back(item);
@@ -106,13 +105,11 @@ impl PlayQueue {
     pub fn pop_front(&self) -> Option<String> {
         let mut q = self.inner.lock().unwrap();
         let item = q.pop_front();
-        if let Ok(mut pre_lock) = self.preloaded.lock() {
-            if let Some(pre) = pre_lock.as_ref() {
-                if item.as_ref() == Some(&pre.query) {
+        if let Ok(mut pre_lock) = self.preloaded.lock()
+            && let Some(pre) = pre_lock.as_ref()
+                && item.as_ref() == Some(&pre.query) {
                     *pre_lock = None;
                 }
-            }
-        }
         item
     }
 
@@ -123,14 +120,13 @@ impl PlayQueue {
     /// Record currently playing track into history
     pub fn record_current(&self, query: String) {
         let mut curr_lock = self.current.lock().unwrap();
-        if let Some(old) = curr_lock.take() {
-            if old != query {
+        if let Some(old) = curr_lock.take()
+            && old != query {
                 let mut hist = self.history.lock().unwrap();
                 if hist.last() != Some(&old) {
                     hist.push(old);
                 }
             }
-        }
         {
             let mut cycle = self.repeat_cycle.lock().unwrap();
             if !cycle.contains(&query) {
@@ -201,11 +197,10 @@ impl PlayQueue {
             let mut cycle = self.repeat_cycle.lock().unwrap().clone();
             if cycle.is_empty() {
                 cycle = self.history.lock().unwrap().clone();
-                if let Some(current) = self.current.lock().unwrap().clone() {
-                    if cycle.last() != Some(&current) {
+                if let Some(current) = self.current.lock().unwrap().clone()
+                    && cycle.last() != Some(&current) {
                         cycle.push(current);
                     }
-                }
                 *self.repeat_cycle.lock().unwrap() = cycle.clone();
             }
             if !cycle.is_empty() {
@@ -225,11 +220,10 @@ impl PlayQueue {
         };
         let query = q.remove(index)?;
         let mut pre_lock = self.preloaded.lock().unwrap();
-        if let Some(pre) = pre_lock.take() {
-            if pre.query == query {
+        if let Some(pre) = pre_lock.take()
+            && pre.query == query {
                 return Some((query, Some(pre)));
             }
-        }
         Some((query, None))
     }
 
@@ -237,11 +231,10 @@ impl PlayQueue {
         let mut q = self.inner.lock().unwrap();
         let query = q.remove(index)?;
         let mut pre_lock = self.preloaded.lock().unwrap();
-        if let Some(pre) = pre_lock.take() {
-            if pre.query == query {
+        if let Some(pre) = pre_lock.take()
+            && pre.query == query {
                 return Some((query, Some(pre)));
             }
-        }
         Some((query, None))
     }
 
@@ -255,11 +248,10 @@ impl PlayQueue {
         if let Some(mut positions) = upcoming_cycle_positions(&cycle, &old_upcoming) {
             cycle.remove(positions.swap_remove(index));
         }
-        if let Ok(mut pre_lock) = self.preloaded.lock() {
-            if pre_lock.as_ref().is_some_and(|pre| pre.query == query) {
+        if let Ok(mut pre_lock) = self.preloaded.lock()
+            && pre_lock.as_ref().is_some_and(|pre| pre.query == query) {
                 *pre_lock = None;
             }
-        }
         Some(query)
     }
 
@@ -414,13 +406,11 @@ impl PlayQueue {
             if *preloading {
                 return;
             }
-            if let Ok(pre_lock) = self.preloaded.lock() {
-                if let Some(pre) = pre_lock.as_ref() {
-                    if pre.query == next_query {
+            if let Ok(pre_lock) = self.preloaded.lock()
+                && let Some(pre) = pre_lock.as_ref()
+                    && pre.query == next_query {
                         return; // Already preloaded
                     }
-                }
-            }
             *preloading = true;
         }
 
@@ -444,18 +434,15 @@ impl PlayQueue {
                     let temp_path =
                         std::env::temp_dir().join(format!("rs_yt_cover_pre_{}.png", meta.id));
                     let client = reqwest::Client::new();
-                    if let Ok(resp) = client.get(thumb_url).send().await {
-                        if let Ok(bytes) = resp.bytes().await {
-                            if let Ok(dynamic_img) = image::load_from_memory(&bytes) {
-                                if dynamic_img
+                    if let Ok(resp) = client.get(thumb_url).send().await
+                        && let Ok(bytes) = resp.bytes().await
+                            && let Ok(dynamic_img) = image::load_from_memory(&bytes)
+                                && dynamic_img
                                     .save_with_format(&temp_path, image::ImageFormat::Png)
                                     .is_ok()
                                 {
                                     cover_path = Some(temp_path);
                                 }
-                            }
-                        }
-                    }
                 }
 
                 // Check if queue front still matches this track
@@ -483,9 +470,9 @@ impl PlayQueue {
         let queue_clone = self.clone();
         tokio::spawn(async move {
             let is_empty = queue_clone.is_empty();
-            if is_empty {
-                if let Ok(related_ids) = extractor.extract_autoplay_next(&current_id).await {
-                    if queue_clone.is_empty() && queue_clone.repeat_mode() == RepeatMode::Off {
+            if is_empty
+                && let Ok(related_ids) = extractor.extract_autoplay_next(&current_id).await
+                    && queue_clone.is_empty() && queue_clone.repeat_mode() == RepeatMode::Off {
                         let count = related_ids.len();
                         for id in related_ids {
                             queue_clone
@@ -493,8 +480,6 @@ impl PlayQueue {
                         }
                         info!("Prefetched {} autoplay recommendations into queue", count);
                     }
-                }
-            }
         });
     }
 }
