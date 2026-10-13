@@ -311,6 +311,7 @@ impl PlayQueue {
         Some(prev)
     }
 
+    #[allow(dead_code)]
     pub fn clear(&self) {
         self.inner.lock().unwrap().clear();
         self.history.lock().unwrap().clear();

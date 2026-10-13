@@ -97,7 +97,6 @@ pub fn register_ui_callbacks(
 
         let search_records = Arc::clone(&search_records_for_search);
         let search_generation = Arc::clone(&search_generation_for_search);
-        let loading_abort = loading_abort_for_search.clone();
         tokio::spawn(async move {
             let search_result = extractor.search_tracks(&query_str).await;
             match search_result {
@@ -130,29 +129,17 @@ pub fn register_ui_callbacks(
                                     &library_for_ui,
                                 ));
                                 ui.set_panel_message(slint::SharedString::from(message));
+                                ui.set_is_loading(false);
                                 if is_empty {
-                                    ui.set_is_loading(false);
                                     ui.set_track_status(slint::SharedString::from("NO RESULTS"));
+                                } else if ui.get_track_status() == "SEARCHING" {
+                                    ui.set_track_status(slint::SharedString::from("READY"));
+                                }
+                                if !ui.get_queue_expanded() {
+                                    apply_queue_expanded(&ui, true);
                                 }
                             }
                         });
-
-                        // Auto-play top match directly without forcing user to click
-                        if let Some(best) = records.first() {
-                            let best_url = best.video_url();
-                            start_track_playback(
-                                best_url,
-                                extractor,
-                                player,
-                                smtc,
-                                ui_weak.clone(),
-                                queue,
-                                library.clone(),
-                                last_query,
-                                true,
-                                loading_abort,
-                            );
-                        }
                     }
                     if let Ok(client) = reqwest::Client::builder()
                         .timeout(Duration::from_secs(8))
@@ -284,7 +271,7 @@ pub fn register_ui_callbacks(
             queue_for_search_result.clone(),
             library_for_search_result.clone(),
             Arc::clone(&last_query_for_search_result),
-            true,
+            false,
             loading_abort_for_search_result.clone(),
         );
     });
@@ -308,7 +295,7 @@ pub fn register_ui_callbacks(
             queue_for_favorite.clone(),
             library_for_favorite.clone(),
             Arc::clone(&last_query_for_favorite),
-            true,
+            false,
             loading_abort_for_favorite.clone(),
         );
     });
@@ -356,7 +343,7 @@ pub fn register_ui_callbacks(
             queue_for_history.clone(),
             library_for_history.clone(),
             Arc::clone(&last_query_for_history),
-            true,
+            false,
             loading_abort_for_history.clone(),
         );
     });
@@ -692,8 +679,6 @@ pub fn register_ui_callbacks(
     let player_for_stop = Arc::clone(&player);
     let smtc_for_stop = smtc.clone();
     let ui_weak_stop = app.as_weak();
-    let queue_for_stop = play_queue.clone();
-    let library_for_stop = library.clone();
     let loading_abort_for_stop = Arc::clone(&current_loading_abort);
     app.on_stop(move || {
         if let Ok(mut guard) = loading_abort_for_stop.lock()
@@ -701,17 +686,14 @@ pub fn register_ui_callbacks(
                 handle.abort();
             }
         player_for_stop.stop();
-        queue_for_stop.clear();
         if let Some(smtc_arc) = &smtc_for_stop
             && let Ok(mut lock) = smtc_arc.lock() {
                 lock.0.set_playback(false);
             }
         if let Some(ui) = ui_weak_stop.upgrade() {
-            ui.set_queue_items(queue_items_model(&queue_for_stop, &library_for_stop));
             ui.set_is_playing(false);
             ui.set_can_retry(false);
             ui.set_track_status(slint::SharedString::from("STOPPED"));
-            ui.set_has_active_track(false);
             ui.set_progress_ratio(0.0);
             ui.set_buffer_ratio(0.0);
             ui.set_time_display(slint::SharedString::from("00:00 / 00:00"));
