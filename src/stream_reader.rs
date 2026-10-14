@@ -51,7 +51,8 @@ fn build_blocking_client(
         }
     }
     reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(15))
         .default_headers(headers)
         .build()
         .map_err(std::io::Error::other)
@@ -206,7 +207,25 @@ impl HttpStreamReader {
             {
                 Ok(response) => response,
                 Err(error) if attempt < 2 && (error.is_timeout() || error.is_connect()) => {
-                    std::thread::sleep(std::time::Duration::from_millis(250 * (attempt + 1)));
+                    // Discard broken pooled TCP sockets that were severed during sleep
+                    if let Ok(new_client) = build_blocking_client(self.request_headers.as_ref()) {
+                        self.client = new_client;
+                    }
+                    if !refreshed_during_fetch
+                        && let Some(refresher) = &self.url_refresher
+                        && let Ok((new_url, new_headers)) = refresher()
+                    {
+                        tracing::info!("Proactively refreshed YouTube stream URL after network connect/timeout error.");
+                        self.url = new_url;
+                        if let Some(headers) = new_headers {
+                            self.request_headers = Some(headers.clone());
+                            if let Ok(new_client) = build_blocking_client(Some(&headers)) {
+                                self.client = new_client;
+                            }
+                        }
+                        refreshed_during_fetch = true;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(300 * (attempt + 1)));
                     continue;
                 }
                 Err(error) => {

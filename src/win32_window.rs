@@ -8,11 +8,23 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::w;
 use tracing::info;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 pub const WINDOW_TITLE: &windows::core::PCWSTR = &w!("YouTube Audio Player");
 
-/// Win32 window subclass procedure to intercept SC_MINIMIZE
-/// This hides the window completely from desktop and taskbar,
-/// keeping the Slint event loop and background audio playing uninterrupted.
+pub static SYSTEM_WENT_TO_SLEEP: AtomicBool = AtomicBool::new(false);
+pub static SYSTEM_RESUMED_FROM_SLEEP: AtomicBool = AtomicBool::new(false);
+
+pub fn take_system_resumed() -> bool {
+    SYSTEM_RESUMED_FROM_SLEEP.swap(false, Ordering::SeqCst)
+}
+
+pub fn take_system_suspended() -> bool {
+    SYSTEM_WENT_TO_SLEEP.swap(false, Ordering::SeqCst)
+}
+
+/// Win32 window subclass procedure to intercept SC_MINIMIZE and WM_POWERBROADCAST.
+/// Hides the window on minimize, and detects system sleep/resume transitions.
 pub unsafe extern "system" fn window_subclass_proc(
     hwnd: HWND,
     msg: u32,
@@ -22,6 +34,21 @@ pub unsafe extern "system" fn window_subclass_proc(
     _ref_data: usize,
 ) -> LRESULT {
     const SC_MINIMIZE_CODE: usize = 0xF020;
+    const WM_POWERBROADCAST_MSG: u32 = 0x0218;
+    const PBT_APMSUSPEND_CODE: usize = 0x0004;
+    const PBT_APMRESUMEAUTOMATIC_CODE: usize = 0x0012;
+    const PBT_APMRESUMESUSPEND_CODE: usize = 0x0007;
+
+    if msg == WM_POWERBROADCAST_MSG {
+        if wparam.0 == PBT_APMSUSPEND_CODE {
+            info!("Power notification: System is suspending (entering sleep/hibernate).");
+            SYSTEM_WENT_TO_SLEEP.store(true, Ordering::SeqCst);
+        } else if wparam.0 == PBT_APMRESUMEAUTOMATIC_CODE || wparam.0 == PBT_APMRESUMESUSPEND_CODE {
+            info!("Power notification: System resumed from sleep/hibernate.");
+            SYSTEM_RESUMED_FROM_SLEEP.store(true, Ordering::SeqCst);
+        }
+    }
+
     let minimize_command = msg == WM_SYSCOMMAND && (wparam.0 & 0xFFF0) == SC_MINIMIZE_CODE;
     let minimized_size = msg == WM_SIZE && wparam.0 == SIZE_MINIMIZED as usize;
     if minimize_command || minimized_size {

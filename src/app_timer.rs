@@ -13,7 +13,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::extractor::Extractor;
 use crate::library::LibraryStore;
 use crate::playback_coordinator::{
-    trigger_next, trigger_previous, LoadingAbortHandle, SmtcHandle,
+    trigger_next, trigger_previous, trigger_toggle_play_pause, LoadingAbortHandle, SmtcHandle,
 };
 use crate::player::AudioPlayer;
 use crate::queue::PlayQueue;
@@ -37,6 +37,7 @@ pub fn start_playback_polling_timer(
     last_query: Arc<Mutex<Option<String>>>,
     current_loading_abort: LoadingAbortHandle,
     pending_seek: Arc<Mutex<Option<PendingSeekState>>>,
+    audio_stream: rodio::OutputStream,
 ) -> slint::Timer {
     let timer = slint::Timer::default();
     let tray_clone = tray;
@@ -53,11 +54,43 @@ pub fn start_playback_polling_timer(
     let pending_seek_for_timer = Arc::clone(&pending_seek);
     let mut queue_display_snapshot = Vec::<String>::new();
     let mut stream_error_displayed = false;
+    #[allow(unused_assignments)]
+    let mut active_audio_stream: Option<rodio::OutputStream> = Some(audio_stream);
 
     timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(100),
         move || {
+            let _ = &active_audio_stream;
+            // Check for system sleep suspension event
+            if crate::win32_window::take_system_suspended() && !player_for_timer.is_paused() {
+                info!("System sleep detected: auto-pausing playback to preserve position.");
+                player_for_timer.pause();
+                if let Some(ui) = ui_weak_timer.upgrade() {
+                    ui.set_is_playing(false);
+                    ui.set_track_status(slint::SharedString::from("PAUSED"));
+                }
+                if let Some(smtc_arc) = &smtc_clone
+                    && let Ok(mut lock) = smtc_arc.lock() {
+                        lock.0.set_playback(false);
+                    }
+            }
+
+            // Check for system resume event
+            if crate::win32_window::take_system_resumed() {
+                info!("System resume detected: re-validating default audio output device.");
+                match rodio::OutputStream::try_default() {
+                    Ok((new_stream, new_handle)) => {
+                        info!("Successfully re-initialized audio output device after system resume.");
+                        player_for_timer.update_stream_handle(new_handle);
+                        active_audio_stream = Some(new_stream);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Could not re-open audio device immediately after resume: {:#}", e);
+                    }
+                }
+            }
+
             let current_queue_display = queue_for_timer.display_items();
             if current_queue_display != queue_display_snapshot {
                 queue_display_snapshot = current_queue_display;
@@ -98,20 +131,13 @@ pub fn start_playback_polling_timer(
                             let _ = ui.show();
                         }
                     } else if menu_event.id == t.play_pause_id {
-                        let is_paused = player_for_timer.is_paused();
-                        if is_paused {
-                            player_for_timer.resume();
-                        } else {
-                            player_for_timer.pause();
-                        }
-                        if let Some(ui) = ui_weak_timer.upgrade() {
-                            ui.set_is_playing(is_paused);
-                            ui.set_track_status(if is_paused {
-                                slint::SharedString::from("PLAYING")
-                            } else {
-                                slint::SharedString::from("PAUSED")
-                            });
-                        }
+                        trigger_toggle_play_pause(
+                            Arc::clone(&player_for_timer),
+                            Arc::clone(&extractor_for_timer),
+                            smtc_clone.clone(),
+                            ui_weak_timer.clone(),
+                            Arc::clone(&last_query_for_timer),
+                        );
                     }
                 }
             }
@@ -140,37 +166,35 @@ pub fn start_playback_polling_timer(
                     while let Ok(event) = lock.1.try_recv() {
                         match event {
                             MediaControlEvent::Play => {
-                                player_for_timer.resume();
-                                lock.0.set_playback(true);
-                                if let Some(ui) = ui_weak_timer.upgrade() {
-                                    ui.set_is_playing(true);
-                                    ui.set_track_status(slint::SharedString::from("PLAYING"));
+                                if player_for_timer.is_paused() {
+                                    trigger_toggle_play_pause(
+                                        Arc::clone(&player_for_timer),
+                                        Arc::clone(&extractor_for_timer),
+                                        smtc_clone.clone(),
+                                        ui_weak_timer.clone(),
+                                        Arc::clone(&last_query_for_timer),
+                                    );
                                 }
                             }
                             MediaControlEvent::Pause => {
-                                player_for_timer.pause();
-                                lock.0.set_playback(false);
-                                if let Some(ui) = ui_weak_timer.upgrade() {
-                                    ui.set_is_playing(false);
-                                    ui.set_track_status(slint::SharedString::from("PAUSED"));
+                                if !player_for_timer.is_paused() {
+                                    trigger_toggle_play_pause(
+                                        Arc::clone(&player_for_timer),
+                                        Arc::clone(&extractor_for_timer),
+                                        smtc_clone.clone(),
+                                        ui_weak_timer.clone(),
+                                        Arc::clone(&last_query_for_timer),
+                                    );
                                 }
                             }
                             MediaControlEvent::Toggle => {
-                                let is_paused = player_for_timer.is_paused();
-                                if is_paused {
-                                    player_for_timer.resume();
-                                } else {
-                                    player_for_timer.pause();
-                                }
-                                lock.0.set_playback(is_paused);
-                                if let Some(ui) = ui_weak_timer.upgrade() {
-                                    ui.set_is_playing(is_paused);
-                                    ui.set_track_status(if is_paused {
-                                        slint::SharedString::from("PLAYING")
-                                    } else {
-                                        slint::SharedString::from("PAUSED")
-                                    });
-                                }
+                                trigger_toggle_play_pause(
+                                    Arc::clone(&player_for_timer),
+                                    Arc::clone(&extractor_for_timer),
+                                    smtc_clone.clone(),
+                                    ui_weak_timer.clone(),
+                                    Arc::clone(&last_query_for_timer),
+                                );
                             }
                             MediaControlEvent::Next => {
                                 trigger_next(

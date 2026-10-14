@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
     let app = AppWindow::new()?;
     // Initialize yt-dlp first so the player uses the exact binary selected by Extractor.
     let extractor = Arc::new(Extractor::new().await?);
-    let (_stream, stream_handle) = rodio::OutputStream::try_default().map_err(|e| {
+    let (stream, stream_handle) = rodio::OutputStream::try_default().map_err(|e| {
         anyhow::anyhow!("Failed to open default Windows audio output device: {}", e)
     })?;
     let player = Arc::new(AudioPlayer::new(
@@ -187,6 +187,7 @@ async fn main() -> Result<()> {
         Arc::clone(&last_query),
         Arc::clone(&current_loading_abort),
         Arc::clone(&pending_seek),
+        stream,
     );
 
     // Run Slint Event Loop

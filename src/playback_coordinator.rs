@@ -458,3 +458,127 @@ pub fn start_track_playback(
             prev.abort();
         }
 }
+
+pub fn trigger_toggle_play_pause(
+    player: Arc<AudioPlayer>,
+    extractor: Arc<Extractor>,
+    smtc: SmtcHandle,
+    ui_weak: slint::Weak<AppWindow>,
+    last_query: Arc<Mutex<Option<String>>>,
+) {
+    if !player.has_track() {
+        return;
+    }
+
+    let is_paused = player.is_paused();
+    if !is_paused {
+        // Pausing is instantaneous and synchronous
+        player.pause();
+        if let Some(smtc_arc) = &smtc
+            && let Ok(mut lock) = smtc_arc.lock() {
+                lock.0.set_playback(false);
+            }
+        let _ = ui_weak.upgrade_in_event_loop(|ui| {
+            ui.set_is_playing(false);
+            ui.set_track_status(slint::SharedString::from("PAUSED"));
+        });
+    } else {
+        // Resuming: check if direct unpause is safe or if background refresh is required
+        let needs_refresh = player.is_stream_expired_or_stale() || crate::win32_window::take_system_resumed();
+        if !needs_refresh {
+            player.resume_direct();
+            if let Some(smtc_arc) = &smtc
+                && let Ok(mut lock) = smtc_arc.lock() {
+                    lock.0.set_playback(true);
+                }
+            let _ = ui_weak.upgrade_in_event_loop(|ui| {
+                ui.set_is_playing(true);
+                ui.set_track_status(slint::SharedString::from("PLAYING"));
+            });
+        } else {
+            // Asynchronously refresh the stream in background without blocking the Slint UI thread
+            let _ = ui_weak.upgrade_in_event_loop(|ui| {
+                ui.set_is_loading(true);
+                ui.set_is_playing(true);
+                ui.set_track_status(slint::SharedString::from("RESUMING..."));
+            });
+            let player_clone = Arc::clone(&player);
+            let extractor_clone = Arc::clone(&extractor);
+            let smtc_clone = smtc.clone();
+            let ui_weak_clone = ui_weak.clone();
+            let last_query_clone = Arc::clone(&last_query);
+
+            tokio::spawn(async move {
+                let current_pos = player_clone.current_position();
+                let total_dur = player_clone.total_duration();
+                let query_opt = player_clone
+                    .current_query()
+                    .or_else(|| last_query_clone.lock().ok().and_then(|g| g.clone()));
+
+                let refresh_result = if let Some(query) = query_opt {
+                    info!("Refreshing stream URL in background on resume for: {}", query);
+                    let yt_dlp = extractor_clone.yt_dlp_path().to_path_buf();
+                    let mut extract_res = Err(anyhow::anyhow!("Initial"));
+                    for attempt in 0..2 {
+                        let query_clone = query.clone();
+                        let yt_dlp_clone = yt_dlp.clone();
+                        extract_res = tokio::task::spawn_blocking(move || {
+                            crate::extractor::extract_stream_url_sync(&yt_dlp_clone, &query_clone)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(anyhow::anyhow!("Task failed: {}", e)));
+
+                        if extract_res.is_ok() {
+                            break;
+                        }
+                        if attempt == 0 {
+                            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                        }
+                    }
+
+                    match extract_res {
+                        Ok((new_url, new_headers)) => {
+                            let p = Arc::clone(&player_clone);
+                            tokio::task::spawn_blocking(move || {
+                                let _ = p.recreate_sink();
+                                p.seek_stream_to(&new_url, new_headers, None, current_pos, total_dur)
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(anyhow::anyhow!("Seek task failed: {}", e)))
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    Err(anyhow::anyhow!("No active query to refresh"))
+                };
+
+                match refresh_result {
+                    Ok(()) => {
+                        info!("Stream resumed successfully at {:.1}s.", current_pos);
+                        if let Some(smtc_arc) = &smtc_clone
+                            && let Ok(mut lock) = smtc_arc.lock() {
+                                lock.0.set_playback(true);
+                            }
+                        let _ = ui_weak_clone.upgrade_in_event_loop(|ui| {
+                            ui.set_is_loading(false);
+                            ui.set_is_playing(true);
+                            ui.set_track_status(slint::SharedString::from("PLAYING"));
+                        });
+                    }
+                    Err(err) => {
+                        error!("Failed to refresh stream on resume: {:#}", err);
+                        let _ = ui_weak_clone.upgrade_in_event_loop(|ui| {
+                            ui.set_is_loading(false);
+                            ui.set_is_playing(false);
+                            ui.set_can_retry(true);
+                            ui.set_track_status(slint::SharedString::from("ERROR"));
+                            ui.set_track_artist(slint::SharedString::from(
+                                "Network reconnect failed. Click play to retry.",
+                            ));
+                        });
+                    }
+                }
+            });
+        }
+    }
+}

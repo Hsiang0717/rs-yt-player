@@ -70,6 +70,7 @@ struct PlaybackTiming {
 
 #[derive(Clone)]
 pub struct AudioPlayer {
+    stream_handle: Arc<Mutex<OutputStreamHandle>>,
     sink: Arc<Mutex<Sink>>,
     volume: Arc<Mutex<f32>>,
     yt_dlp_path: std::path::PathBuf,
@@ -92,6 +93,7 @@ impl AudioPlayer {
         let sink = Sink::try_new(stream_handle).context("Failed to create audio Sink")?;
 
         Ok(Self {
+            stream_handle: Arc::new(Mutex::new(stream_handle.clone())),
             sink: Arc::new(Mutex::new(sink)),
             volume: Arc::new(Mutex::new(1.0)),
             yt_dlp_path,
@@ -110,6 +112,55 @@ impl AudioPlayer {
             current_stream_total_size: Arc::new(Mutex::new(None)),
             byte_cache: Arc::new(Mutex::new(None)),
         })
+    }
+
+    pub fn update_stream_handle(&self, new_handle: OutputStreamHandle) {
+        let mut handle_guard = self.stream_handle.lock().unwrap();
+        *handle_guard = new_handle;
+        if let Ok(new_sink) = Sink::try_new(&handle_guard) {
+            let vol = *self.volume.lock().unwrap();
+            new_sink.set_volume(vol);
+            *self.sink.lock().unwrap() = new_sink;
+            info!("Audio Sink successfully re-initialized with new audio output stream handle.");
+        }
+    }
+
+    pub fn recreate_sink(&self) -> Result<()> {
+        let handle = self.stream_handle.lock().unwrap();
+        let new_sink = Sink::try_new(&handle).context("Failed to create new audio Sink")?;
+        let vol = *self.volume.lock().unwrap();
+        new_sink.set_volume(vol);
+        *self.sink.lock().unwrap() = new_sink;
+        info!("Audio Sink recreated successfully.");
+        Ok(())
+    }
+
+    pub fn current_query(&self) -> Option<String> {
+        self.current_query.lock().unwrap().clone()
+    }
+
+    pub fn has_track(&self) -> bool {
+        self.current_stream_url.lock().unwrap().is_some() || self.current_query.lock().unwrap().is_some()
+    }
+
+    pub fn is_stream_expired_or_stale(&self) -> bool {
+        if self.stream_error().is_some() {
+            return true;
+        }
+        self.current_stream_url
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(is_url_expired)
+            .unwrap_or(false)
+    }
+
+    pub fn resume_direct(&self) {
+        self.sink.lock().unwrap().play();
+        let mut timing = self.timing.lock().unwrap();
+        timing.start_instant = Some(Instant::now());
+        timing.is_paused = false;
+        info!("Audio resumed directly from {:.1}s.", timing.base_offset_secs);
     }
 
     pub fn set_current_query(&self, query: Option<String>) {
@@ -237,7 +288,7 @@ impl AudioPlayer {
     }
 
     /// Internal seamless seek that prepares the new AAC range source first before swapping sink
-    fn seek_stream_to(
+    pub fn seek_stream_to(
         &self,
         stream_url: &str,
         request_headers: Option<HashMap<String, String>>,

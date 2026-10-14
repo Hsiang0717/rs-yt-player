@@ -6,8 +6,8 @@ use tracing::info;
 use crate::extractor::Extractor;
 use crate::library::{LibraryStore, TrackRecord};
 use crate::playback_coordinator::{
-    play_with_metadata, start_track_playback, trigger_next, trigger_previous, LoadingAbortHandle,
-    SmtcHandle,
+    play_with_metadata, start_track_playback, trigger_next, trigger_previous,
+    trigger_toggle_play_pause, LoadingAbortHandle, SmtcHandle,
 };
 use crate::player::AudioPlayer;
 use crate::queue::PlayQueue;
@@ -581,30 +581,18 @@ pub fn register_ui_callbacks(
 
     // --- 7. Playback Control Callbacks ---
     let player_for_toggle = Arc::clone(&player);
+    let extractor_for_toggle = Arc::clone(&extractor);
     let smtc_for_toggle = smtc.clone();
     let ui_weak_toggle = app.as_weak();
+    let last_query_for_toggle = Arc::clone(&last_query);
     app.on_toggle_play_pause(move || {
-        let player = &player_for_toggle;
-        let is_paused = player.is_paused();
-        if is_paused {
-            player.resume();
-        } else {
-            player.pause();
-        }
-
-        if let Some(smtc_arc) = &smtc_for_toggle
-            && let Ok(mut lock) = smtc_arc.lock() {
-                lock.0.set_playback(is_paused);
-            }
-
-        if let Some(ui) = ui_weak_toggle.upgrade() {
-            ui.set_is_playing(is_paused);
-            ui.set_track_status(if is_paused {
-                slint::SharedString::from("PLAYING")
-            } else {
-                slint::SharedString::from("PAUSED")
-            });
-        }
+        trigger_toggle_play_pause(
+            Arc::clone(&player_for_toggle),
+            Arc::clone(&extractor_for_toggle),
+            smtc_for_toggle.clone(),
+            ui_weak_toggle.clone(),
+            Arc::clone(&last_query_for_toggle),
+        );
     });
 
     let player_for_prev = Arc::clone(&player);
