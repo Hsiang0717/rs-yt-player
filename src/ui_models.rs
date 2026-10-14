@@ -58,8 +58,12 @@ pub fn track_row_model(
     let rows = tracks
         .into_iter()
         .map(|(track, key)| {
-            let cover =
-                slint::Image::load_from_path(&library.cover_path(&track.id)).unwrap_or_default();
+            let cover_file = library.cover_path(&track.id);
+            let cover = if cover_file.exists() {
+                slint::Image::load_from_path(&cover_file).unwrap_or_default()
+            } else {
+                slint::Image::default()
+            };
             let duration = track.duration_label();
             TrackRow {
                 key: slint::SharedString::from(key),

@@ -151,11 +151,16 @@ export component AppWindow inherits Window {
                     border-color: search_input.has-focus ? Theme.accent_primary : Theme.border_subtle;
                     animate border-color { duration: 100ms; }
 
+                    TouchArea {
+                        clicked => {
+                            search_input.focus();
+                        }
+                    }
+
                     HorizontalLayout {
                         padding-left: 10px;
                         padding-right: 8px;
                         spacing: 8px;
-                        alignment: center;
 
                         Image {
                             source: @image-url("icons/search.svg");
@@ -202,7 +207,10 @@ export component AppWindow inherits Window {
                             icon_size: 11px;
                             default_color: Theme.text_muted;
                             hover_color: Theme.text_primary;
-                            clicked => { root.search_query = ""; }
+                            clicked => {
+                                root.search_query = "";
+                                search_input.focus();
+                            }
                         }
                     }
                 }
