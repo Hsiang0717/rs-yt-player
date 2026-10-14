@@ -33,11 +33,19 @@ pub fn bind_navigation_controls(app: &AppWindow, queue: PlayQueue, library: Libr
     let ui_weak = app.as_weak();
     let queue_for_toggle = queue;
     let library_for_toggle = library;
+    let last_toggle = Arc::new(Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(1)));
     app.on_toggle_queue(move || {
+        let mut last = last_toggle.lock().unwrap();
+        if last.elapsed() < std::time::Duration::from_millis(220) {
+            return;
+        }
+        *last = std::time::Instant::now();
         if let Some(ui) = ui_weak.upgrade() {
             let expanded = !ui.get_queue_expanded();
             apply_queue_expanded(&ui, expanded);
-            ui.set_queue_items(queue_items_model(&queue_for_toggle, &library_for_toggle));
+            if expanded {
+                ui.set_queue_items(queue_items_model(&queue_for_toggle, &library_for_toggle));
+            }
         }
     });
 

@@ -131,7 +131,6 @@ pub fn queue_items_model(queue: &PlayQueue, library: &LibraryStore) -> slint::Mo
 }
 
 pub fn apply_queue_expanded(ui: &AppWindow, expanded: bool) {
-    ui.set_queue_expanded(expanded);
     let current_size = ui.window().size().to_logical(ui.window().scale_factor());
     let logical_w = current_size.width.max(540.0);
     let target_h = if expanded {
@@ -140,6 +139,7 @@ pub fn apply_queue_expanded(ui: &AppWindow, expanded: bool) {
         185.0
     };
     ui.window().set_size(slint::LogicalSize::new(logical_w, target_h));
+    ui.set_queue_expanded(expanded);
 }
 
 #[allow(dead_code)]

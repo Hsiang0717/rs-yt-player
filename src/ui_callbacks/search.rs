@@ -38,6 +38,7 @@ pub fn bind_search_controls(
         let library_for_start = ctx_for_search.library.clone();
         let query_title = query_str.clone();
         let _ = ui_for_start.upgrade_in_event_loop(move |ui| {
+            apply_queue_expanded(&ui, true);
             ui.set_track_title(slint::SharedString::from(format!("Searching: {}", query_title)));
             ui.set_track_status(slint::SharedString::from("SEARCHING"));
             ui.set_is_loading(true);

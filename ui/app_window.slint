@@ -15,8 +15,8 @@ export component AppWindow inherits Window {
     preferred-width: 580px;
     preferred-height: root.queue_expanded ? 460px : 185px;
     min-width: 520px;
-    min-height: root.queue_expanded ? 320px : 185px;
-    max-height: root.queue_expanded ? 100000px : 185px;
+    min-height: 185px;
+    max-height: 100000px;
     background: Theme.bg;
     default-font-family: "Segoe UI, sans-serif";
 
@@ -106,6 +106,7 @@ export component AppWindow inherits Window {
             // 背景拖曳區 (點擊未被子元素覆蓋的空白處拖曳視窗)
             TouchArea {
                 moved => { root.start_window_drag(); }
+                clicked => { search_input.clear-focus(); }
             }
 
             HorizontalLayout {
@@ -188,6 +189,14 @@ export component AppWindow inherits Window {
                                         root.queue_expanded = true;
                                         root.search_and_play(self.text);
                                     }
+                                    self.clear-focus();
+                                }
+                                key-pressed(event) => {
+                                    if (event.text == Key.Escape) {
+                                        self.clear-focus();
+                                        return accept;
+                                    }
+                                    return reject;
                                 }
                             }
 
@@ -252,6 +261,10 @@ export component AppWindow inherits Window {
         Rectangle {
             height: 143px;
             background: Theme.bg;
+
+            TouchArea {
+                clicked => { search_input.clear-focus(); }
+            }
 
             HorizontalLayout {
                 padding-left: 14px;
@@ -603,6 +616,11 @@ export component AppWindow inherits Window {
         if root.queue_expanded: Rectangle {
             vertical-stretch: 1;
             background: Theme.panel_bg;
+            clip: true;
+
+            TouchArea {
+                clicked => { search_input.clear-focus(); }
+            }
 
             VerticalLayout {
                 padding-top: 6px;
