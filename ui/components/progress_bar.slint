@@ -35,7 +35,7 @@ export component InteractiveProgressBar {
             y: 0;
             width: parent.width * Math.max(0.0, Math.min(1.0, root.ratio));
             height: parent.height;
-            background: touch.has-hover || root.is_scrubbing ? Theme.accent_green_active : Theme.accent_green;
+            background: touch.has-hover || root.is_scrubbing ? Theme.accent_primary_active : Theme.accent_primary;
             border-radius: self.height / 2;
             animate background { duration: 80ms; }
         }

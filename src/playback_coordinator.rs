@@ -123,6 +123,8 @@ pub async fn play_with_metadata(
                 ui.set_buffer_ratio(0.0);
                 let position_m = (start_offset_secs as u64) / 60;
                 let position_s = (start_offset_secs as u64) % 60;
+                ui.set_time_current(slint::SharedString::from(format!("{:02}:{:02}", position_m, position_s)));
+                ui.set_time_total(slint::SharedString::from(duration_str.clone()));
                 ui.set_time_display(slint::SharedString::from(format!(
                     "{:02}:{:02} / {}",
                     position_m, position_s, duration_str
@@ -157,6 +159,8 @@ pub async fn play_with_metadata(
                 ui.set_has_cover(false);
                 ui.set_progress_ratio(0.0);
                 ui.set_buffer_ratio(0.0);
+                ui.set_time_current(slint::SharedString::from("00:00"));
+                ui.set_time_total(slint::SharedString::from("00:00"));
                 ui.set_time_display(slint::SharedString::from("00:00 / 00:00"));
             }
         }

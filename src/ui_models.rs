@@ -5,11 +5,17 @@ use crate::{AppWindow, TrackRow};
 use slint::ComponentHandle;
 use tracing::info;
 
+pub fn sanitize_text(raw: &str) -> String {
+    raw.chars()
+        .filter(|&c| c != '\u{FFFD}' && c != '\u{FFFC}' && (!c.is_control() || c == ' '))
+        .collect()
+}
+
 pub fn record_from_search(result: SearchResult) -> TrackRecord {
     TrackRecord {
         id: result.id,
-        title: result.title,
-        artist: result.uploader.unwrap_or_else(|| "Unknown artist".into()),
+        title: sanitize_text(&result.title),
+        artist: sanitize_text(&result.uploader.unwrap_or_else(|| "Unknown artist".into())),
         duration_secs: result.duration,
         thumbnail_url: result.thumbnail,
     }
@@ -18,11 +24,13 @@ pub fn record_from_search(result: SearchResult) -> TrackRecord {
 pub fn record_from_audio(meta: &AudioMetadata) -> TrackRecord {
     TrackRecord {
         id: meta.id.clone(),
-        title: meta.title.clone(),
-        artist: meta
-            .uploader
-            .clone()
-            .unwrap_or_else(|| "Unknown artist".into()),
+        title: sanitize_text(&meta.title),
+        artist: sanitize_text(
+            &meta
+                .uploader
+                .clone()
+                .unwrap_or_else(|| "Unknown artist".into()),
+        ),
         duration_secs: meta.duration,
         thumbnail_url: meta.thumbnail.clone(),
     }
@@ -101,11 +109,11 @@ pub fn queue_items_model(queue: &PlayQueue, library: &LibraryStore) -> slint::Mo
 pub fn apply_queue_expanded(ui: &AppWindow, expanded: bool) {
     ui.set_queue_expanded(expanded);
     let current_size = ui.window().size().to_logical(ui.window().scale_factor());
-    let logical_w = current_size.width.max(500.0);
+    let logical_w = current_size.width.max(540.0);
     let target_h = if expanded {
-        current_size.height.max(310.0)
+        current_size.height.max(460.0)
     } else {
-        130.0
+        185.0
     };
     ui.window().set_size(slint::LogicalSize::new(logical_w, target_h));
 }

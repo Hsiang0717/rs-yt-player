@@ -171,6 +171,7 @@ async fn main() -> Result<()> {
         Arc::clone(&last_query),
         Arc::clone(&pending_seek),
         Arc::clone(&search_records),
+        Arc::clone(&main_hwnd),
     );
 
     // Start background polling timer

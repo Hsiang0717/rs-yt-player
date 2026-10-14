@@ -39,7 +39,27 @@ pub fn register_ui_callbacks(
     last_query: Arc<Mutex<Option<String>>>,
     pending_seek: Arc<Mutex<Option<PendingSeekState>>>,
     search_records: Arc<Mutex<Vec<TrackRecord>>>,
+    main_hwnd: Arc<Mutex<Option<windows::Win32::Foundation::HWND>>>,
 ) {
+    // --- 0. Window Management Callbacks ---
+    let hwnd_for_drag = Arc::clone(&main_hwnd);
+    app.on_start_window_drag(move || {
+        if let Some(hwnd) = *hwnd_for_drag.lock().unwrap() {
+            crate::win32_window::start_window_drag(hwnd);
+        }
+    });
+
+    let hwnd_for_min = Arc::clone(&main_hwnd);
+    app.on_minimize_window(move || {
+        if let Some(hwnd) = *hwnd_for_min.lock().unwrap() {
+            crate::win32_window::minimize_to_tray(hwnd);
+        }
+    });
+
+    app.on_close_window(move || {
+        let _ = slint::quit_event_loop();
+    });
+
     // --- 1. Search and Play Callback ---
     let player_for_play = Arc::clone(&player);
     let extractor_for_play = Arc::clone(&extractor);
@@ -684,6 +704,8 @@ pub fn register_ui_callbacks(
             ui.set_track_status(slint::SharedString::from("STOPPED"));
             ui.set_progress_ratio(0.0);
             ui.set_buffer_ratio(0.0);
+            ui.set_time_current(slint::SharedString::from("00:00"));
+            ui.set_time_total(slint::SharedString::from("00:00"));
             ui.set_time_display(slint::SharedString::from("00:00 / 00:00"));
         }
     });
@@ -699,6 +721,8 @@ pub fn register_ui_callbacks(
         let tot_m = (total_dur as u64) / 60;
         let tot_s = (total_dur as u64) % 60;
         if let Some(ui) = ui_weak_scrub.upgrade() {
+            ui.set_time_current(slint::SharedString::from(format!("{:02}:{:02}", cur_m, cur_s)));
+            ui.set_time_total(slint::SharedString::from(format!("{:02}:{:02}", tot_m, tot_s)));
             ui.set_time_display(slint::SharedString::from(format!(
                 "{:02}:{:02} / {:02}:{:02}",
                 cur_m, cur_s, tot_m, tot_s
@@ -731,6 +755,8 @@ pub fn register_ui_callbacks(
             let cur_s = (target_secs as u64) % 60;
             let tot_m = (total_dur as u64) / 60;
             let tot_s = (total_dur as u64) % 60;
+            ui.set_time_current(slint::SharedString::from(format!("{:02}:{:02}", cur_m, cur_s)));
+            ui.set_time_total(slint::SharedString::from(format!("{:02}:{:02}", tot_m, tot_s)));
             ui.set_time_display(slint::SharedString::from(format!(
                 "{:02}:{:02} / {:02}:{:02}",
                 cur_m, cur_s, tot_m, tot_s

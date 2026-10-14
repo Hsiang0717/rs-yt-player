@@ -1,5 +1,6 @@
 import { Theme } from "../theme.slint";
 import { TrackRow } from "../models.slint";
+import { IconButton } from "../components/icon_button.slint";
 
 export component TrackItemView inherits Rectangle {
     in property <TrackRow> item;
@@ -11,139 +12,172 @@ export component TrackItemView inherits Rectangle {
     callback toggle_fav();
     callback remove();
 
-    height: 40px;
-    background: root.item.is_current ? Theme.surface_hover : (Math.mod(root.index, 2) == 0 ? Theme.surface : Theme.surface_alt);
-    border-radius: 3px;
+    height: 44px;
+    background: root.item.is_current ? Theme.surface_active : (item_touch.has-hover ? Theme.surface_hover : (Math.mod(root.index, 2) == 0 ? Theme.surface : Theme.surface_alt));
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: root.item.is_current ? Theme.border : transparent;
+    animate background { duration: 100ms; }
 
     HorizontalLayout {
-        padding-left: 6px;
-        padding-right: 6px;
-        spacing: 6px;
+        padding-left: 8px;
+        padding-right: 10px;
+        spacing: 10px;
 
-        // Track Info & Cover (Click to play)
+        // 1. 左側當前播放指示豎條 (固定位置)
+        Rectangle {
+            width: 3px;
+            height: 22px;
+            background: root.item.is_current ? Theme.accent_primary : transparent;
+            border-radius: 1.5px;
+            y: (parent.height - self.height) / 2;
+        }
+
+        // 2. 歌曲點擊播放區塊 (靠左固定縮圖 + 伸縮歌名)
         Rectangle {
             horizontal-stretch: 1;
             background: transparent;
 
             HorizontalLayout {
-                spacing: 6px;
-                Image {
-                    source: root.item.cover;
-                    image-fit: cover;
-                    width: 32px;
-                    height: 32px;
+                width: 100%;
+                height: 100%;
+                spacing: 10px;
+
+                // 固定 34x34 縮圖與佔位圖 (永遠置左)
+                Rectangle {
+                    width: 34px;
+                    height: 34px;
+                    border-radius: 4px;
+                    clip: true;
+                    background: Theme.panel_bg;
+                    y: (parent.height - self.height) / 2;
+
+                    Image {
+                        source: @image-url("../icons/music-note.svg");
+                        width: 16px;
+                        height: 16px;
+                        colorize: Theme.text_muted;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+
+                    Image {
+                        source: root.item.cover;
+                        image-fit: cover;
+                        width: 100%;
+                        height: 100%;
+                    }
                 }
+
+                // 歌名與作者 (填滿剩餘寬度，靠左對齊)
                 VerticalLayout {
                     horizontal-stretch: 1;
                     alignment: center;
-                    spacing: 1px;
+                    spacing: 2px;
+
                     Text {
                         text: root.item.title;
-                        color: root.item.is_current ? Theme.accent_green : Theme.text_primary;
-                        font-size: 11px;
+                        color: root.item.is_current ? Theme.accent_primary : Theme.text_primary;
+                        font-size: 12px;
+                        font-weight: root.item.is_current ? 700 : 500;
                         overflow: elide;
+                        horizontal-alignment: left;
                     }
                     Text {
-                        text: root.item.artist + "  •  " + root.item.duration;
+                        text: root.item.artist;
                         color: Theme.text_secondary;
-                        font-size: 9px;
+                        font-size: 10px;
                         overflow: elide;
+                        horizontal-alignment: left;
                     }
                 }
             }
 
-            TouchArea {
+            item_touch := TouchArea {
                 mouse-cursor: pointer;
                 clicked => { root.play(); }
             }
         }
 
-        // Search: +Q button
-        if root.mode == "SEARCH": Rectangle {
-            width: 28px;
-            height: 26px;
-            background: q_touch.has-hover ? Theme.border : Theme.surface_active;
-            border-radius: 3px;
-
-            Path {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                width: 14px;
-                height: 12px;
-                stroke: Theme.accent_green;
-                stroke-width: 1.4px;
-                commands: "M 1 3 L 8 3 M 1 6 L 8 6 M 1 9 L 6 9 M 11 6 L 11 12 M 8 9 L 14 9";
-            }
-
-            q_touch := TouchArea {
-                mouse-cursor: pointer;
-                clicked => { root.enqueue(); }
-            }
+        // 3. 右側固定時長 (等寬靠右)
+        Text {
+            text: root.item.duration;
+            color: Theme.text_muted;
+            font-size: 11px;
+            vertical-alignment: center;
+            min-width: 44px;
+            horizontal-alignment: right;
         }
 
-        // Search / History: Favorite Button
-        if root.mode == "SEARCH" || root.mode == "HISTORY": Rectangle {
-            width: 26px;
-            height: 26px;
-            background: fav_touch.has-hover ? Theme.border : transparent;
-            border-radius: 3px;
-            Text {
-                text: root.item.is_favorite ? "♥" : "♡";
-                color: root.item.is_favorite ? Theme.accent_gold : Theme.text_primary;
-                font-size: 13px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                width: 100%;
-                height: 100%;
+        // 4. 右側操作按鈕區
+        if root.mode == "SEARCH": HorizontalLayout {
+            spacing: 4px;
+            alignment: center;
+
+            IconButton {
+                width: 26px;
+                height: 26px;
+                icon: @image-url("../icons/plus.svg");
+                icon_size: 14px;
+                default_color: Theme.accent_primary;
+                hover_color: Theme.accent_primary_hover;
+                clicked => { root.enqueue(); }
             }
-            fav_touch := TouchArea {
-                mouse-cursor: pointer;
+
+            IconButton {
+                width: 26px;
+                height: 26px;
+                icon: root.item.is_favorite ? @image-url("../icons/heart-filled.svg") : @image-url("../icons/heart.svg");
+                icon_size: 14px;
+                active: root.item.is_favorite;
+                active_color: Theme.accent_gold;
+                default_color: Theme.text_secondary;
                 clicked => { root.toggle_fav(); }
             }
         }
 
-        // Saved: Remove from Favorites Button
-        if root.mode == "SAVED": Rectangle {
-            width: 24px;
-            height: 24px;
-            background: rem_touch.has-hover ? Theme.border : transparent;
-            border-radius: 3px;
-            Text {
-                text: "✕";
-                color: Theme.accent_gold;
-                font-size: 11px;
-                font-weight: 700;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                width: 100%;
-                height: 100%;
+        if root.mode == "HISTORY": HorizontalLayout {
+            spacing: 4px;
+            alignment: center;
+
+            IconButton {
+                width: 26px;
+                height: 26px;
+                icon: root.item.is_favorite ? @image-url("../icons/heart-filled.svg") : @image-url("../icons/heart.svg");
+                icon_size: 14px;
+                active: root.item.is_favorite;
+                active_color: Theme.accent_gold;
+                default_color: Theme.text_secondary;
+                clicked => { root.toggle_fav(); }
             }
-            rem_touch := TouchArea {
-                mouse-cursor: pointer;
+        }
+
+        if root.mode == "SAVED": HorizontalLayout {
+            spacing: 4px;
+            alignment: center;
+
+            IconButton {
+                width: 26px;
+                height: 26px;
+                icon: @image-url("../icons/close.svg");
+                icon_size: 14px;
+                default_color: Theme.accent_gold;
+                hover_color: Theme.accent_gold_hover;
                 clicked => { root.remove(); }
             }
         }
 
-        // Queue: Remove from Queue Button
-        if root.mode == "QUEUE": Rectangle {
-            width: 24px;
-            height: 24px;
-            background: rm_touch.has-hover ? Theme.border : transparent;
-            border-radius: 3px;
+        if root.mode == "QUEUE": HorizontalLayout {
+            spacing: 4px;
+            alignment: center;
 
-            Text {
-                text: "✕";
-                color: Theme.accent_danger;
-                font-size: 11px;
-                font-weight: 700;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                width: 100%;
-                height: 100%;
-            }
-
-            rm_touch := TouchArea {
-                mouse-cursor: pointer;
+            IconButton {
+                width: 26px;
+                height: 26px;
+                icon: @image-url("../icons/close.svg");
+                icon_size: 14px;
+                default_color: Theme.accent_danger;
+                hover_color: #E09E8A;
                 clicked => { root.remove(); }
             }
         }

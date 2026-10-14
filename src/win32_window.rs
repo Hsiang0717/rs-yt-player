@@ -83,6 +83,23 @@ pub fn set_taskbar_button(hwnd: HWND, visible: bool) {
     }
 }
 
+pub fn start_window_drag(hwnd: HWND) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+    use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_NCLBUTTONDOWN};
+    const HTCAPTION: usize = 2;
+    unsafe {
+        let _ = ReleaseCapture();
+        let _ = SendMessageW(hwnd, WM_NCLBUTTONDOWN, WPARAM(HTCAPTION), LPARAM(0));
+    }
+}
+
+pub fn minimize_to_tray(hwnd: HWND) {
+    set_taskbar_button(hwnd, false);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+    }
+}
+
 pub struct SingleInstanceGuard {
     handle: windows::Win32::Foundation::HANDLE,
 }

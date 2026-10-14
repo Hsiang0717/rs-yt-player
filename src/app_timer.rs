@@ -309,6 +309,8 @@ pub fn start_playback_polling_timer(
                             let cur_s = (current_pos as u64) % 60;
                             let tot_m = (total_dur as u64) / 60;
                             let tot_s = (total_dur as u64) % 60;
+                            ui.set_time_current(slint::SharedString::from(format!("{:02}:{:02}", cur_m, cur_s)));
+                            ui.set_time_total(slint::SharedString::from(format!("{:02}:{:02}", tot_m, tot_s)));
                             ui.set_time_display(slint::SharedString::from(format!(
                                 "{:02}:{:02} / {:02}:{:02}",
                                 cur_m, cur_s, tot_m, tot_s
