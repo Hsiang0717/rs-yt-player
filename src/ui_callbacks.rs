@@ -6,7 +6,7 @@ use tracing::info;
 use crate::extractor::Extractor;
 use crate::library::{LibraryStore, TrackRecord};
 use crate::playback_coordinator::{
-    play_with_metadata, start_track_playback, trigger_next, trigger_previous,
+    play_track, play_with_metadata, start_track_playback, trigger_next, trigger_previous,
     trigger_toggle_play_pause, LoadingAbortHandle, SmtcHandle,
 };
 use crate::player::AudioPlayer;
@@ -27,6 +27,75 @@ pub struct PendingSeekState {
     pub requested_at: Instant,
 }
 
+/// Shared playback dependency bundle to eliminate repetitive Arc/handle cloning.
+#[derive(Clone)]
+struct PlaybackContext {
+    player: Arc<AudioPlayer>,
+    extractor: Arc<Extractor>,
+    smtc: SmtcHandle,
+    queue: PlayQueue,
+    library: LibraryStore,
+    last_query: Arc<Mutex<Option<String>>>,
+    loading_abort: LoadingAbortHandle,
+    ui_weak: slint::Weak<AppWindow>,
+}
+
+impl PlaybackContext {
+    fn start_track(&self, key: String, force_reextract: bool) {
+        start_track_playback(
+            key,
+            Arc::clone(&self.extractor),
+            Arc::clone(&self.player),
+            self.smtc.clone(),
+            self.ui_weak.clone(),
+            self.queue.clone(),
+            self.library.clone(),
+            Arc::clone(&self.last_query),
+            force_reextract,
+            self.loading_abort.clone(),
+        );
+    }
+
+    fn toggle_play_pause(&self) {
+        trigger_toggle_play_pause(
+            Arc::clone(&self.player),
+            Arc::clone(&self.extractor),
+            self.smtc.clone(),
+            self.ui_weak.clone(),
+            Arc::clone(&self.last_query),
+        );
+    }
+
+    fn trigger_previous(&self, is_advancing: &Arc<Mutex<bool>>) {
+        trigger_previous(
+            Arc::clone(&self.extractor),
+            Arc::clone(&self.player),
+            self.smtc.clone(),
+            self.ui_weak.clone(),
+            self.queue.clone(),
+            self.library.clone(),
+            Arc::clone(is_advancing),
+            Arc::clone(&self.last_query),
+            self.loading_abort.clone(),
+        );
+    }
+
+    fn trigger_next(&self, is_advancing: &Arc<Mutex<bool>>) {
+        trigger_next(
+            Arc::clone(&self.extractor),
+            Arc::clone(&self.player),
+            self.smtc.clone(),
+            self.ui_weak.clone(),
+            self.queue.clone(),
+            self.library.clone(),
+            Arc::clone(is_advancing),
+            false,
+            Arc::clone(&self.last_query),
+            self.loading_abort.clone(),
+        );
+    }
+}
+
 pub fn register_ui_callbacks(
     app: &AppWindow,
     player: Arc<AudioPlayer>,
@@ -41,7 +110,33 @@ pub fn register_ui_callbacks(
     search_records: Arc<Mutex<Vec<TrackRecord>>>,
     main_hwnd: Arc<Mutex<Option<windows::Win32::Foundation::HWND>>>,
 ) {
-    // --- 0. Window Management Callbacks ---
+    let ctx = PlaybackContext {
+        player: Arc::clone(&player),
+        extractor,
+        smtc: smtc.clone(),
+        queue: play_queue.clone(),
+        library: library.clone(),
+        last_query,
+        loading_abort: current_loading_abort,
+        ui_weak: app.as_weak(),
+    };
+
+    bind_window_controls(app, main_hwnd);
+    bind_navigation_controls(app, play_queue, library);
+    bind_search_controls(app, ctx.clone(), Arc::clone(&search_records));
+    bind_library_controls(app, ctx.clone(), search_records);
+    bind_queue_controls(app, ctx.clone(), Arc::clone(&is_auto_advancing));
+    bind_playback_controls(app, ctx, is_auto_advancing);
+    bind_seek_and_volume_controls(app, player, smtc, pending_seek);
+}
+
+// ============================================================================
+// 0. Window Management Controls
+// ============================================================================
+fn bind_window_controls(
+    app: &AppWindow,
+    main_hwnd: Arc<Mutex<Option<windows::Win32::Foundation::HWND>>>,
+) {
     let hwnd_for_drag = Arc::clone(&main_hwnd);
     app.on_start_window_drag(move || {
         if let Some(hwnd) = *hwnd_for_drag.lock().unwrap() {
@@ -59,52 +154,60 @@ pub fn register_ui_callbacks(
     app.on_close_window(move || {
         let _ = slint::quit_event_loop();
     });
+}
 
-    // --- 1. Search and Play Callback ---
-    let player_for_play = Arc::clone(&player);
-    let extractor_for_play = Arc::clone(&extractor);
-    let smtc_for_play = smtc.clone();
-    let ui_weak_play = app.as_weak();
-    let queue_for_play = play_queue.clone();
-    let library_for_play = library.clone();
-    let last_query_for_play = Arc::clone(&last_query);
-    let search_records_for_search = Arc::clone(&search_records);
+// ============================================================================
+// 1. Navigation & Panel Controls
+// ============================================================================
+fn bind_navigation_controls(app: &AppWindow, queue: PlayQueue, library: LibraryStore) {
+    let ui_weak = app.as_weak();
+    let queue_for_toggle = queue;
+    let library_for_toggle = library;
+    app.on_toggle_queue(move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            let expanded = !ui.get_queue_expanded();
+            apply_queue_expanded(&ui, expanded);
+            ui.set_queue_items(queue_items_model(&queue_for_toggle, &library_for_toggle));
+        }
+    });
+
+    let ui_weak_tab = app.as_weak();
+    app.on_select_panel_tab(move |tab| {
+        if let Some(ui) = ui_weak_tab.upgrade() {
+            ui.set_panel_tab(tab);
+            ui.set_panel_message(slint::SharedString::default());
+        }
+    });
+}
+
+// ============================================================================
+// 2. Search Controls & Results
+// ============================================================================
+fn bind_search_controls(
+    app: &AppWindow,
+    ctx: PlaybackContext,
+    search_records: Arc<Mutex<Vec<TrackRecord>>>,
+) {
     let search_generation = Arc::new(AtomicU64::new(0));
-    let search_generation_for_search = Arc::clone(&search_generation);
-    let loading_abort_for_search = Arc::clone(&current_loading_abort);
 
+    // on_search_and_play
+    let ctx_for_search = ctx.clone();
+    let search_records_for_search = Arc::clone(&search_records);
+    let search_generation_for_search = Arc::clone(&search_generation);
     app.on_search_and_play(move |query| {
         let query_str = query.to_string();
         if query_str.trim().is_empty() {
             return;
         }
-        let player = Arc::clone(&player_for_play);
-        let extractor = Arc::clone(&extractor_for_play);
-        let smtc = smtc_for_play.clone();
-        let ui_weak = ui_weak_play.clone();
-        let queue = queue_for_play.clone();
-        let library = library_for_play.clone();
-        let last_query = Arc::clone(&last_query_for_play);
-        let token = search_generation_for_search.fetch_add(1, Ordering::SeqCst) + 1;
 
         if is_url(&query_str) {
-            start_track_playback(
-                query_str.clone(),
-                extractor,
-                player,
-                smtc,
-                ui_weak,
-                queue,
-                library,
-                last_query,
-                !query_str.contains("list="),
-                loading_abort_for_search.clone(),
-            );
+            ctx_for_search.start_track(query_str.clone(), !query_str.contains("list="));
             return;
         }
 
-        let ui_for_start = ui_weak.clone();
-        let library_for_start = library.clone();
+        let token = search_generation_for_search.fetch_add(1, Ordering::SeqCst) + 1;
+        let ui_for_start = ctx_for_search.ui_weak.clone();
+        let library_for_start = ctx_for_search.library.clone();
         let query_title = query_str.clone();
         let _ = ui_for_start.upgrade_in_event_loop(move |ui| {
             ui.set_track_title(slint::SharedString::from(format!("Searching: {}", query_title)));
@@ -116,7 +219,11 @@ pub fn register_ui_callbacks(
         });
 
         let search_records = Arc::clone(&search_records_for_search);
-        let search_generation = Arc::clone(&search_generation_for_search);
+        let search_gen = Arc::clone(&search_generation_for_search);
+        let extractor = Arc::clone(&ctx_for_search.extractor);
+        let library = ctx_for_search.library.clone();
+        let ui_weak = ctx_for_search.ui_weak.clone();
+
         tokio::spawn(async move {
             let search_result = extractor.search_tracks(&query_str).await;
             match search_result {
@@ -125,14 +232,14 @@ pub fn register_ui_callbacks(
                         results.into_iter().map(record_from_search).collect();
                     let records_are_current = {
                         let mut saved_records = search_records.lock().unwrap();
-                        if search_generation.load(Ordering::SeqCst) == token {
+                        if search_gen.load(Ordering::SeqCst) == token {
                             *saved_records = records.clone();
                             true
                         } else {
                             false
                         }
                     };
-                    if records_are_current && search_generation.load(Ordering::SeqCst) == token {
+                    if records_are_current && search_gen.load(Ordering::SeqCst) == token {
                         let message = if records.is_empty() {
                             "No results found".to_string()
                         } else {
@@ -140,10 +247,10 @@ pub fn register_ui_callbacks(
                         };
                         let records_for_ui = records.clone();
                         let library_for_ui = library.clone();
-                        let generation_for_ui = Arc::clone(&search_generation);
+                        let gen_for_ui = Arc::clone(&search_gen);
                         let is_empty = records.is_empty();
                         let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                            if generation_for_ui.load(Ordering::SeqCst) == token {
+                            if gen_for_ui.load(Ordering::SeqCst) == token {
                                 ui.set_search_results(records_model(
                                     records_for_ui,
                                     &library_for_ui,
@@ -170,11 +277,11 @@ pub fn register_ui_callbacks(
                             .cloned()
                             .map(|track| cache_track_cover(client.clone(), library.clone(), track));
                         futures_util::future::join_all(downloads).await;
-                        if search_generation.load(Ordering::SeqCst) == token {
-                            let generation_for_ui = Arc::clone(&search_generation);
+                        if search_gen.load(Ordering::SeqCst) == token {
+                            let gen_for_ui = Arc::clone(&search_gen);
                             let library_for_ui = library.clone();
                             let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                                if generation_for_ui.load(Ordering::SeqCst) == token {
+                                if gen_for_ui.load(Ordering::SeqCst) == token {
                                     ui.set_search_results(records_model(records, &library_for_ui));
                                 }
                             });
@@ -183,9 +290,9 @@ pub fn register_ui_callbacks(
                 }
                 Err(error) => {
                     let message = format!("Search failed: {}", error);
-                    if search_generation.load(Ordering::SeqCst) == token {
+                    if search_gen.load(Ordering::SeqCst) == token {
                         let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                            if search_generation.load(Ordering::SeqCst) == token {
+                            if search_gen.load(Ordering::SeqCst) == token {
                                 ui.set_is_loading(false);
                                 ui.set_track_status(slint::SharedString::from("ERROR"));
                                 ui.set_panel_message(slint::SharedString::from(message));
@@ -197,31 +304,11 @@ pub fn register_ui_callbacks(
         });
     });
 
-    // --- 2. Queue and Panel Navigation ---
-    let queue_for_toggle = play_queue.clone();
-    let library_for_toggle = library.clone();
-    let ui_weak_queue = app.as_weak();
-    app.on_toggle_queue(move || {
-        if let Some(ui) = ui_weak_queue.upgrade() {
-            let expanded = !ui.get_queue_expanded();
-            apply_queue_expanded(&ui, expanded);
-            ui.set_queue_items(queue_items_model(&queue_for_toggle, &library_for_toggle));
-        }
-    });
-
-    let ui_weak_tab = app.as_weak();
-    app.on_select_panel_tab(move |tab| {
-        if let Some(ui) = ui_weak_tab.upgrade() {
-            ui.set_panel_tab(tab);
-            ui.set_panel_message(slint::SharedString::default());
-        }
-    });
-
-    // --- 3. Search Results Interaction ---
-    let queue_for_add = play_queue.clone();
-    let library_for_add = library.clone();
+    // on_enqueue_search_result
+    let queue_for_add = ctx.queue.clone();
+    let library_for_add = ctx.library.clone();
     let search_records_for_add = Arc::clone(&search_records);
-    let ui_weak_add = app.as_weak();
+    let ui_weak_add = ctx.ui_weak.clone();
     app.on_enqueue_search_result(move |key| {
         let key = key.to_string();
         let Some(record) = search_records_for_add
@@ -248,154 +335,113 @@ pub fn register_ui_callbacks(
         }
     });
 
-    let library_for_toggle_favorite = library.clone();
-    let search_records_for_favorite = Arc::clone(&search_records);
-    let ui_weak_favorite = app.as_weak();
+    // on_toggle_search_favorite
+    let library_for_toggle = ctx.library.clone();
+    let search_records_for_fav = Arc::clone(&search_records);
+    let ui_weak_fav = ctx.ui_weak.clone();
     app.on_toggle_search_favorite(move |key| {
         let key = key.to_string();
-        let record = search_records_for_favorite
+        let record = search_records_for_fav
             .lock()
             .unwrap()
             .iter()
             .find(|record| record.video_url() == key)
             .cloned();
         if let Some(record) = record {
-            library_for_toggle_favorite.toggle_favorite(record);
-            if let Some(ui) = ui_weak_favorite.upgrade() {
-                let results = search_records_for_favorite.lock().unwrap().clone();
-                ui.set_search_results(records_model(results, &library_for_toggle_favorite));
+            library_for_toggle.toggle_favorite(record);
+            if let Some(ui) = ui_weak_fav.upgrade() {
+                let results = search_records_for_fav.lock().unwrap().clone();
+                ui.set_search_results(records_model(results, &library_for_toggle));
                 ui.set_favorite_items(records_model(
-                    library_for_toggle_favorite.favorites(),
-                    &library_for_toggle_favorite,
+                    library_for_toggle.favorites(),
+                    &library_for_toggle,
                 ));
                 ui.set_panel_message(slint::SharedString::from("Favorites updated"));
             }
         }
     });
 
-    let player_for_search_result = Arc::clone(&player);
-    let extractor_for_search_result = Arc::clone(&extractor);
-    let smtc_for_search_result = smtc.clone();
-    let ui_weak_search_result = app.as_weak();
-    let queue_for_search_result = play_queue.clone();
-    let library_for_search_result = library.clone();
-    let last_query_for_search_result = Arc::clone(&last_query);
-    let loading_abort_for_search_result = Arc::clone(&current_loading_abort);
+    // on_play_search_result
+    let ctx_for_play = ctx;
     app.on_play_search_result(move |key| {
-        start_track_playback(
-            key.to_string(),
-            Arc::clone(&extractor_for_search_result),
-            Arc::clone(&player_for_search_result),
-            smtc_for_search_result.clone(),
-            ui_weak_search_result.clone(),
-            queue_for_search_result.clone(),
-            library_for_search_result.clone(),
-            Arc::clone(&last_query_for_search_result),
-            false,
-            loading_abort_for_search_result.clone(),
-        );
+        ctx_for_play.start_track(key.to_string(), false);
     });
+}
 
-    // --- 4. Favorites & History Interaction ---
-    let player_for_favorite = Arc::clone(&player);
-    let extractor_for_favorite = Arc::clone(&extractor);
-    let smtc_for_favorite = smtc.clone();
-    let ui_weak_favorite_play = app.as_weak();
-    let queue_for_favorite = play_queue.clone();
-    let library_for_favorite = library.clone();
-    let last_query_for_favorite = Arc::clone(&last_query);
-    let loading_abort_for_favorite = Arc::clone(&current_loading_abort);
+// ============================================================================
+// 3. Favorites & History Controls
+// ============================================================================
+fn bind_library_controls(
+    app: &AppWindow,
+    ctx: PlaybackContext,
+    search_records: Arc<Mutex<Vec<TrackRecord>>>,
+) {
+    let ctx_for_play_fav = ctx.clone();
     app.on_play_favorite(move |key| {
-        start_track_playback(
-            key.to_string(),
-            Arc::clone(&extractor_for_favorite),
-            Arc::clone(&player_for_favorite),
-            smtc_for_favorite.clone(),
-            ui_weak_favorite_play.clone(),
-            queue_for_favorite.clone(),
-            library_for_favorite.clone(),
-            Arc::clone(&last_query_for_favorite),
-            false,
-            loading_abort_for_favorite.clone(),
-        );
+        ctx_for_play_fav.start_track(key.to_string(), false);
     });
 
-    let library_for_remove_favorite = library.clone();
-    let search_records_for_remove_favorite = Arc::clone(&search_records);
-    let ui_weak_remove_favorite = app.as_weak();
+    let library_for_remove = ctx.library.clone();
+    let search_records_for_remove = Arc::clone(&search_records);
+    let ui_weak_remove = ctx.ui_weak.clone();
     app.on_remove_favorite(move |key| {
         let id = query_video_id(key.as_str());
-        if let Some(track) = library_for_remove_favorite
+        if let Some(track) = library_for_remove
             .favorites()
             .into_iter()
             .find(|track| track.id == id)
         {
-            library_for_remove_favorite.toggle_favorite(track);
-            if let Some(ui) = ui_weak_remove_favorite.upgrade() {
+            library_for_remove.toggle_favorite(track);
+            if let Some(ui) = ui_weak_remove.upgrade() {
                 ui.set_favorite_items(records_model(
-                    library_for_remove_favorite.favorites(),
-                    &library_for_remove_favorite,
+                    library_for_remove.favorites(),
+                    &library_for_remove,
                 ));
-                ui.set_search_results(records_model(
-                    search_records_for_remove_favorite.lock().unwrap().clone(),
-                    &library_for_remove_favorite,
+                let results = search_records_for_remove.lock().unwrap().clone();
+                ui.set_search_results(records_model(results, &library_for_remove));
+                ui.set_history_items(records_model(
+                    library_for_remove.recent(),
+                    &library_for_remove,
                 ));
-                ui.set_current_is_favorite(library_for_remove_favorite.is_favorite(&id));
+                ui.set_current_is_favorite(library_for_remove.is_favorite(&id));
+                ui.set_panel_message(slint::SharedString::from("Removed from favorites"));
             }
         }
     });
 
-    let player_for_history = Arc::clone(&player);
-    let extractor_for_history = Arc::clone(&extractor);
-    let smtc_for_history = smtc.clone();
-    let ui_weak_history = app.as_weak();
-    let queue_for_history = play_queue.clone();
-    let library_for_history = library.clone();
-    let last_query_for_history = Arc::clone(&last_query);
-    let loading_abort_for_history = Arc::clone(&current_loading_abort);
+    let ctx_for_play_history = ctx.clone();
     app.on_play_history(move |key| {
-        start_track_playback(
-            key.to_string(),
-            Arc::clone(&extractor_for_history),
-            Arc::clone(&player_for_history),
-            smtc_for_history.clone(),
-            ui_weak_history.clone(),
-            queue_for_history.clone(),
-            library_for_history.clone(),
-            Arc::clone(&last_query_for_history),
-            false,
-            loading_abort_for_history.clone(),
-        );
+        ctx_for_play_history.start_track(key.to_string(), false);
     });
 
-    let library_for_history_favorite = library.clone();
-    let ui_weak_history_favorite = app.as_weak();
+    let library_for_hist_fav = ctx.library.clone();
+    let ui_weak_hist_fav = ctx.ui_weak.clone();
     app.on_favorite_history(move |key| {
         let id = query_video_id(key.as_str());
-        if let Some(track) = library_for_history_favorite
+        if let Some(track) = library_for_hist_fav
             .recent()
             .into_iter()
             .find(|track| track.id == id)
         {
-            library_for_history_favorite.toggle_favorite(track);
-            if let Some(ui) = ui_weak_history_favorite.upgrade() {
+            library_for_hist_fav.toggle_favorite(track);
+            if let Some(ui) = ui_weak_hist_fav.upgrade() {
                 ui.set_history_items(records_model(
-                    library_for_history_favorite.recent(),
-                    &library_for_history_favorite,
+                    library_for_hist_fav.recent(),
+                    &library_for_hist_fav,
                 ));
                 ui.set_favorite_items(records_model(
-                    library_for_history_favorite.favorites(),
-                    &library_for_history_favorite,
+                    library_for_hist_fav.favorites(),
+                    &library_for_hist_fav,
                 ));
-                ui.set_current_is_favorite(library_for_history_favorite.is_favorite(&id));
+                ui.set_current_is_favorite(library_for_hist_fav.is_favorite(&id));
             }
         }
     });
 
-    let library_for_current_favorite = library.clone();
-    let ui_weak_current_favorite = app.as_weak();
+    let library_for_curr_fav = ctx.library;
+    let ui_weak_curr_fav = ctx.ui_weak;
     app.on_toggle_current_favorite(move || {
-        let Some(ui) = ui_weak_current_favorite.upgrade() else {
+        let Some(ui) = ui_weak_curr_fav.upgrade() else {
             return;
         };
         let key = ui.get_current_track_key().to_string();
@@ -403,34 +449,42 @@ pub fn register_ui_callbacks(
             return;
         }
         let id = query_video_id(&key);
-        let record = library_for_current_favorite
+        let record = library_for_curr_fav
             .recent()
             .into_iter()
             .find(|track| track.id == id)
             .or_else(|| {
-                library_for_current_favorite
+                library_for_curr_fav
                     .favorites()
                     .into_iter()
                     .find(|track| track.id == id)
             });
         if let Some(record) = record {
-            let is_favorite = library_for_current_favorite.toggle_favorite(record);
+            let is_favorite = library_for_curr_fav.toggle_favorite(record);
             ui.set_current_is_favorite(is_favorite);
             ui.set_favorite_items(records_model(
-                library_for_current_favorite.favorites(),
-                &library_for_current_favorite,
+                library_for_curr_fav.favorites(),
+                &library_for_curr_fav,
             ));
             ui.set_history_items(records_model(
-                library_for_current_favorite.recent(),
-                &library_for_current_favorite,
+                library_for_curr_fav.recent(),
+                &library_for_curr_fav,
             ));
         }
     });
+}
 
-    // --- 5. Mode Toggles (Repeat & Shuffle) ---
-    let queue_for_repeat = play_queue.clone();
-    let library_for_repeat = library.clone();
-    let ui_weak_repeat = app.as_weak();
+// ============================================================================
+// 4. Queue Management Controls
+// ============================================================================
+fn bind_queue_controls(
+    app: &AppWindow,
+    ctx: PlaybackContext,
+    is_auto_advancing: Arc<Mutex<bool>>,
+) {
+    let queue_for_repeat = ctx.queue.clone();
+    let library_for_repeat = ctx.library.clone();
+    let ui_weak_repeat = ctx.ui_weak.clone();
     app.on_cycle_repeat_mode(move || {
         let mode = queue_for_repeat.repeat_mode().next();
         queue_for_repeat.set_repeat_mode(mode);
@@ -440,9 +494,9 @@ pub fn register_ui_callbacks(
         }
     });
 
-    let queue_for_shuffle = play_queue.clone();
-    let library_for_shuffle = library.clone();
-    let ui_weak_shuffle = app.as_weak();
+    let queue_for_shuffle = ctx.queue.clone();
+    let library_for_shuffle = ctx.library.clone();
+    let ui_weak_shuffle = ctx.ui_weak.clone();
     app.on_toggle_shuffle(move || {
         let enabled = !queue_for_shuffle.shuffle_enabled();
         queue_for_shuffle.set_shuffle_enabled(enabled);
@@ -452,36 +506,17 @@ pub fn register_ui_callbacks(
         }
     });
 
-    let last_query_for_retry = Arc::clone(&last_query);
-    let player_for_retry = Arc::clone(&player);
-    let extractor_for_retry = Arc::clone(&extractor);
-    let smtc_for_retry = smtc.clone();
-    let ui_weak_retry = app.as_weak();
-    let queue_for_retry = play_queue.clone();
-    let library_for_retry = library.clone();
-    let loading_abort_for_retry = Arc::clone(&current_loading_abort);
+    let ctx_for_retry = ctx.clone();
     app.on_retry_playback(move || {
-        let query = last_query_for_retry.lock().unwrap().clone();
+        let query = ctx_for_retry.last_query.lock().unwrap().clone();
         if let Some(query) = query {
-            start_track_playback(
-                query,
-                Arc::clone(&extractor_for_retry),
-                Arc::clone(&player_for_retry),
-                smtc_for_retry.clone(),
-                ui_weak_retry.clone(),
-                queue_for_retry.clone(),
-                library_for_retry.clone(),
-                Arc::clone(&last_query_for_retry),
-                false,
-                loading_abort_for_retry.clone(),
-            );
+            ctx_for_retry.start_track(query, false);
         }
     });
 
-    // --- 6. Queue Management Items ---
-    let queue_for_remove = play_queue.clone();
-    let library_for_remove = library.clone();
-    let ui_weak_remove = app.as_weak();
+    let queue_for_remove = ctx.queue.clone();
+    let library_for_remove = ctx.library.clone();
+    let ui_weak_remove = ctx.ui_weak.clone();
     app.on_remove_queue_item(move |index| {
         if queue_for_remove.remove_at(index as usize).is_some()
             && let Some(ui) = ui_weak_remove.upgrade() {
@@ -490,9 +525,9 @@ pub fn register_ui_callbacks(
             }
     });
 
-    let queue_for_move_up = play_queue.clone();
-    let library_for_move_up = library.clone();
-    let ui_weak_move_up = app.as_weak();
+    let queue_for_move_up = ctx.queue.clone();
+    let library_for_move_up = ctx.library.clone();
+    let ui_weak_move_up = ctx.ui_weak.clone();
     app.on_move_queue_item_up(move |index| {
         let index = index as usize;
         if index > 0 && queue_for_move_up.move_item(index, index - 1)
@@ -501,9 +536,9 @@ pub fn register_ui_callbacks(
             }
     });
 
-    let queue_for_move_down = play_queue.clone();
-    let library_for_move_down = library.clone();
-    let ui_weak_move_down = app.as_weak();
+    let queue_for_move_down = ctx.queue.clone();
+    let library_for_move_down = ctx.library.clone();
+    let ui_weak_move_down = ctx.ui_weak.clone();
     app.on_move_queue_item_down(move |index| {
         let index = index as usize;
         if queue_for_move_down.move_item(index, index + 1)
@@ -515,9 +550,9 @@ pub fn register_ui_callbacks(
             }
     });
 
-    let queue_for_clear = play_queue.clone();
-    let library_for_clear = library.clone();
-    let ui_weak_clear = app.as_weak();
+    let queue_for_clear = ctx.queue.clone();
+    let library_for_clear = ctx.library.clone();
+    let ui_weak_clear = ctx.ui_weak.clone();
     app.on_clear_queue(move || {
         queue_for_clear.clear_upcoming();
         if let Some(ui) = ui_weak_clear.upgrade() {
@@ -526,40 +561,36 @@ pub fn register_ui_callbacks(
         }
     });
 
-    let queue_for_play_item = play_queue.clone();
-    let library_for_play_item = library.clone();
-    let extractor_for_play_item = Arc::clone(&extractor);
-    let player_for_play_item = Arc::clone(&player);
-    let smtc_for_play_item = smtc.clone();
-    let ui_weak_play_item = app.as_weak();
-    let advance_for_play_item = Arc::clone(&is_auto_advancing);
-    let last_query_for_play_item = Arc::clone(&last_query);
-    let loading_abort_for_play_item = Arc::clone(&current_loading_abort);
+    let ctx_for_item = ctx;
+    let advance_for_item = is_auto_advancing;
     app.on_play_queue_item(move |index| {
-        let mut advancing = advance_for_play_item.lock().unwrap();
+        let mut advancing = advance_for_item.lock().unwrap();
         if *advancing {
             return;
         }
-        let Some((query, preloaded)) = queue_for_play_item.pop_at(index as usize) else {
+        let Some((query, preloaded)) = ctx_for_item.queue.pop_at(index as usize) else {
             return;
         };
         *advancing = true;
         drop(advancing);
-        if let Some(ui) = ui_weak_play_item.upgrade() {
+
+        if let Some(ui) = ctx_for_item.ui_weak.upgrade() {
             ui.set_queue_items(queue_items_model(
-                &queue_for_play_item,
-                &library_for_play_item,
+                &ctx_for_item.queue,
+                &ctx_for_item.library,
             ));
         }
-        let queue = queue_for_play_item.clone();
-        let library = library_for_play_item.clone();
-        let extractor = Arc::clone(&extractor_for_play_item);
-        let player = Arc::clone(&player_for_play_item);
-        let smtc = smtc_for_play_item.clone();
-        let ui_weak = ui_weak_play_item.clone();
-        let advance = Arc::clone(&advance_for_play_item);
-        let last_query = Arc::clone(&last_query_for_play_item);
-        let abort_handle = loading_abort_for_play_item.clone();
+
+        let queue = ctx_for_item.queue.clone();
+        let library = ctx_for_item.library.clone();
+        let extractor = Arc::clone(&ctx_for_item.extractor);
+        let player = Arc::clone(&ctx_for_item.player);
+        let smtc = ctx_for_item.smtc.clone();
+        let ui_weak = ctx_for_item.ui_weak.clone();
+        let advance = Arc::clone(&advance_for_item);
+        let last_query = Arc::clone(&ctx_for_item.last_query);
+        let abort_handle = ctx_for_item.loading_abort.clone();
+
         let join_handle = tokio::spawn(async move {
             if let Some(preloaded) = preloaded {
                 let cache_path = library.cover_path(&preloaded.meta.id);
@@ -586,87 +617,51 @@ pub fn register_ui_callbacks(
                 )
                 .await;
             } else {
-                crate::playback_coordinator::play_track(
+                play_track(
                     query, extractor, player, smtc, ui_weak, queue, library, last_query,
                 )
                 .await;
             }
             *advance.lock().unwrap() = false;
         });
+
         if let Ok(mut guard) = abort_handle.lock()
             && let Some(prev) = guard.replace(join_handle.abort_handle()) {
                 prev.abort();
             }
     });
+}
 
-    // --- 7. Playback Control Callbacks ---
-    let player_for_toggle = Arc::clone(&player);
-    let extractor_for_toggle = Arc::clone(&extractor);
-    let smtc_for_toggle = smtc.clone();
-    let ui_weak_toggle = app.as_weak();
-    let last_query_for_toggle = Arc::clone(&last_query);
+// ============================================================================
+// 5. Playback Transport Controls
+// ============================================================================
+fn bind_playback_controls(
+    app: &AppWindow,
+    ctx: PlaybackContext,
+    is_auto_advancing: Arc<Mutex<bool>>,
+) {
+    let ctx_for_toggle = ctx.clone();
     app.on_toggle_play_pause(move || {
-        trigger_toggle_play_pause(
-            Arc::clone(&player_for_toggle),
-            Arc::clone(&extractor_for_toggle),
-            smtc_for_toggle.clone(),
-            ui_weak_toggle.clone(),
-            Arc::clone(&last_query_for_toggle),
-        );
+        ctx_for_toggle.toggle_play_pause();
     });
 
-    let player_for_prev = Arc::clone(&player);
-    let extractor_for_prev = Arc::clone(&extractor);
-    let smtc_for_prev = smtc.clone();
-    let ui_weak_prev = app.as_weak();
-    let queue_for_prev = play_queue.clone();
-    let library_for_prev = library.clone();
-    let is_advancing_prev = Arc::clone(&is_auto_advancing);
-    let last_query_for_prev = Arc::clone(&last_query);
-    let loading_abort_for_prev = Arc::clone(&current_loading_abort);
+    let ctx_for_prev = ctx.clone();
+    let advance_for_prev = Arc::clone(&is_auto_advancing);
     app.on_play_previous(move || {
-        trigger_previous(
-            Arc::clone(&extractor_for_prev),
-            Arc::clone(&player_for_prev),
-            smtc_for_prev.clone(),
-            ui_weak_prev.clone(),
-            queue_for_prev.clone(),
-            library_for_prev.clone(),
-            Arc::clone(&is_advancing_prev),
-            Arc::clone(&last_query_for_prev),
-            loading_abort_for_prev.clone(),
-        );
+        ctx_for_prev.trigger_previous(&advance_for_prev);
     });
 
-    let player_for_next = Arc::clone(&player);
-    let extractor_for_next = Arc::clone(&extractor);
-    let smtc_for_next = smtc.clone();
-    let ui_weak_next = app.as_weak();
-    let queue_for_next = play_queue.clone();
-    let library_for_next = library.clone();
-    let is_advancing_next = Arc::clone(&is_auto_advancing);
-    let last_query_for_next = Arc::clone(&last_query);
-    let loading_abort_for_next = Arc::clone(&current_loading_abort);
+    let ctx_for_next = ctx.clone();
+    let advance_for_next = Arc::clone(&is_auto_advancing);
     app.on_play_next(move || {
-        trigger_next(
-            Arc::clone(&extractor_for_next),
-            Arc::clone(&player_for_next),
-            smtc_for_next.clone(),
-            ui_weak_next.clone(),
-            queue_for_next.clone(),
-            library_for_next.clone(),
-            Arc::clone(&is_advancing_next),
-            false,
-            Arc::clone(&last_query_for_next),
-            loading_abort_for_next.clone(),
-        );
+        ctx_for_next.trigger_next(&advance_for_next);
     });
 
-    let loading_abort_for_cancel = Arc::clone(&current_loading_abort);
-    let ui_weak_cancel = app.as_weak();
-    let advance_for_cancel = Arc::clone(&is_auto_advancing);
+    let abort_for_cancel = ctx.loading_abort.clone();
+    let ui_weak_cancel = ctx.ui_weak.clone();
+    let advance_for_cancel = is_auto_advancing;
     app.on_cancel_loading(move || {
-        if let Ok(mut guard) = loading_abort_for_cancel.lock()
+        if let Ok(mut guard) = abort_for_cancel.lock()
             && let Some(handle) = guard.take() {
                 handle.abort();
                 info!("Active loading task was aborted by user.");
@@ -684,12 +679,12 @@ pub fn register_ui_callbacks(
         }
     });
 
-    let player_for_stop = Arc::clone(&player);
-    let smtc_for_stop = smtc.clone();
-    let ui_weak_stop = app.as_weak();
-    let loading_abort_for_stop = Arc::clone(&current_loading_abort);
+    let player_for_stop = Arc::clone(&ctx.player);
+    let smtc_for_stop = ctx.smtc;
+    let ui_weak_stop = ctx.ui_weak;
+    let abort_for_stop = ctx.loading_abort;
     app.on_stop(move || {
-        if let Ok(mut guard) = loading_abort_for_stop.lock()
+        if let Ok(mut guard) = abort_for_stop.lock()
             && let Some(handle) = guard.take() {
                 handle.abort();
             }
@@ -709,8 +704,17 @@ pub fn register_ui_callbacks(
             ui.set_time_display(slint::SharedString::from("00:00 / 00:00"));
         }
     });
+}
 
-    // --- 8. Scrubbing and Seeking ---
+// ============================================================================
+// 6. Scrubbing, Seeking, Volume & Mute Controls
+// ============================================================================
+fn bind_seek_and_volume_controls(
+    app: &AppWindow,
+    player: Arc<AudioPlayer>,
+    smtc: SmtcHandle,
+    pending_seek: Arc<Mutex<Option<PendingSeekState>>>,
+) {
     let player_for_scrub = Arc::clone(&player);
     let ui_weak_scrub = app.as_weak();
     app.on_on_user_scrub(move |ratio| {
@@ -734,8 +738,8 @@ pub fn register_ui_callbacks(
     let seek_lock = Arc::new(tokio::sync::Mutex::new(()));
     let player_for_seek = Arc::clone(&player);
     let ui_weak_seek = app.as_weak();
-    let smtc_for_seek = smtc.clone();
-    let pending_seek_for_seek = Arc::clone(&pending_seek);
+    let smtc_for_seek = smtc;
+    let pending_seek_for_seek = pending_seek;
     let seek_seq_for_seek = Arc::clone(&seek_seq);
     let seek_lock_for_seek = Arc::clone(&seek_lock);
     app.on_on_user_seek(move |ratio| {
@@ -805,7 +809,6 @@ pub fn register_ui_callbacks(
         });
     });
 
-    // --- 9. Volume & Mute ---
     let player_for_vol = Arc::clone(&player);
     let ui_weak_vol = app.as_weak();
     let saved_volume = Arc::new(Mutex::new(1.0f32));
@@ -820,9 +823,9 @@ pub fn register_ui_callbacks(
         }
     });
 
-    let player_for_mute = Arc::clone(&player);
+    let player_for_mute = player;
     let ui_weak_mute = app.as_weak();
-    let saved_vol_for_mute = Arc::clone(&saved_volume);
+    let saved_vol_for_mute = saved_volume;
     app.on_toggle_mute(move || {
         let Some(ui) = ui_weak_mute.upgrade() else { return };
         let currently_muted = ui.get_is_muted();
