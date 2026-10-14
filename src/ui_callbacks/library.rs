@@ -28,15 +28,18 @@ pub fn bind_library_controls(
         {
             library_for_remove.toggle_favorite(track);
             if let Some(ui) = ui_weak_remove.upgrade() {
+                let curr_key = ui.get_current_track_key();
                 ui.set_favorite_items(records_model(
                     library_for_remove.favorites(),
                     &library_for_remove,
+                    Some(&curr_key),
                 ));
                 let results = search_records_for_remove.lock().unwrap().clone();
-                ui.set_search_results(records_model(results, &library_for_remove));
+                ui.set_search_results(records_model(results, &library_for_remove, Some(&curr_key)));
                 ui.set_history_items(records_model(
                     library_for_remove.recent(),
                     &library_for_remove,
+                    Some(&curr_key),
                 ));
                 ui.set_current_is_favorite(library_for_remove.is_favorite(&id));
                 ui.set_panel_message(slint::SharedString::from("Removed from favorites"));
@@ -60,13 +63,16 @@ pub fn bind_library_controls(
         {
             library_for_hist_fav.toggle_favorite(track);
             if let Some(ui) = ui_weak_hist_fav.upgrade() {
+                let curr_key = ui.get_current_track_key();
                 ui.set_history_items(records_model(
                     library_for_hist_fav.recent(),
                     &library_for_hist_fav,
+                    Some(&curr_key),
                 ));
                 ui.set_favorite_items(records_model(
                     library_for_hist_fav.favorites(),
                     &library_for_hist_fav,
+                    Some(&curr_key),
                 ));
                 ui.set_current_is_favorite(library_for_hist_fav.is_favorite(&id));
             }
@@ -97,13 +103,16 @@ pub fn bind_library_controls(
         if let Some(record) = record {
             let is_favorite = library_for_curr_fav.toggle_favorite(record);
             ui.set_current_is_favorite(is_favorite);
+            let curr_key = ui.get_current_track_key();
             ui.set_favorite_items(records_model(
                 library_for_curr_fav.favorites(),
                 &library_for_curr_fav,
+                Some(&curr_key),
             ));
             ui.set_history_items(records_model(
                 library_for_curr_fav.recent(),
                 &library_for_curr_fav,
+                Some(&curr_key),
             ));
         }
     });

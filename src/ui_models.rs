@@ -54,7 +54,15 @@ pub fn query_video_id(query: &str) -> String {
 pub fn track_row_model(
     tracks: Vec<(TrackRecord, String)>,
     library: &LibraryStore,
+    current_key: Option<&str>,
 ) -> slint::ModelRc<TrackRow> {
+    let curr = current_key.unwrap_or_default();
+    let curr_vid = if !curr.is_empty() {
+        query_video_id(curr)
+    } else {
+        String::new()
+    };
+
     let rows = tracks
         .into_iter()
         .map(|(track, key)| {
@@ -65,13 +73,19 @@ pub fn track_row_model(
                 slint::Image::default()
             };
             let duration = track.duration_label();
+            let is_current = if !curr.is_empty() {
+                key == curr
+                    || (!track.id.is_empty() && (track.id == curr_vid || curr.contains(&track.id)))
+            } else {
+                false
+            };
             TrackRow {
                 key: slint::SharedString::from(key),
                 title: slint::SharedString::from(track.title),
                 artist: slint::SharedString::from(track.artist),
                 duration: slint::SharedString::from(duration),
                 cover,
-                is_current: false,
+                is_current,
                 is_favorite: library.is_favorite(&track.id),
             }
         })
@@ -79,7 +93,11 @@ pub fn track_row_model(
     slint::ModelRc::new(slint::VecModel::from(rows))
 }
 
-pub fn records_model(records: Vec<TrackRecord>, library: &LibraryStore) -> slint::ModelRc<TrackRow> {
+pub fn records_model(
+    records: Vec<TrackRecord>,
+    library: &LibraryStore,
+    current_key: Option<&str>,
+) -> slint::ModelRc<TrackRow> {
     track_row_model(
         records
             .into_iter()
@@ -89,10 +107,12 @@ pub fn records_model(records: Vec<TrackRecord>, library: &LibraryStore) -> slint
             })
             .collect(),
         library,
+        current_key,
     )
 }
 
 pub fn queue_items_model(queue: &PlayQueue, library: &LibraryStore) -> slint::ModelRc<TrackRow> {
+    let current_key = queue.current_query();
     let rows = queue
         .upcoming_items()
         .into_iter()
@@ -107,7 +127,7 @@ pub fn queue_items_model(queue: &PlayQueue, library: &LibraryStore) -> slint::Mo
             (track, item.query)
         })
         .collect();
-    track_row_model(rows, library)
+    track_row_model(rows, library, current_key.as_deref())
 }
 
 pub fn apply_queue_expanded(ui: &AppWindow, expanded: bool) {

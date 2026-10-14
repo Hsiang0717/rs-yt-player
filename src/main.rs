@@ -102,8 +102,8 @@ async fn main() -> Result<()> {
     play_queue.set_shuffle_enabled(library.shuffle_enabled());
     app.set_repeat_mode_label(slint::SharedString::from(library.repeat_mode().label()));
     app.set_shuffle_enabled(library.shuffle_enabled());
-    app.set_favorite_items(records_model(library.favorites(), &library));
-    app.set_history_items(records_model(library.recent(), &library));
+    app.set_favorite_items(records_model(library.favorites(), &library, None));
+    app.set_history_items(records_model(library.recent(), &library, None));
     app.set_queue_items(queue_items_model(&play_queue, &library));
 
     // Show initial window so Windows creates the HWND

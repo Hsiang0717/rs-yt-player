@@ -43,7 +43,7 @@ pub fn bind_search_controls(
             ui.set_is_loading(true);
             ui.set_panel_tab(slint::SharedString::from("SEARCH"));
             ui.set_panel_message(slint::SharedString::from("Searching YouTube…"));
-            ui.set_search_results(records_model(Vec::new(), &library_for_start));
+            ui.set_search_results(records_model(Vec::new(), &library_for_start, None));
         });
 
         let search_records = Arc::clone(&search_records_for_search);
@@ -79,9 +79,11 @@ pub fn bind_search_controls(
                         let is_empty = records.is_empty();
                         let _ = ui_weak.upgrade_in_event_loop(move |ui| {
                             if gen_for_ui.load(Ordering::SeqCst) == token {
+                                let curr_key = ui.get_current_track_key();
                                 ui.set_search_results(records_model(
                                     records_for_ui,
                                     &library_for_ui,
+                                    Some(&curr_key),
                                 ));
                                 ui.set_panel_message(slint::SharedString::from(message));
                                 ui.set_is_loading(false);
@@ -110,7 +112,12 @@ pub fn bind_search_controls(
                             let library_for_ui = library.clone();
                             let _ = ui_weak.upgrade_in_event_loop(move |ui| {
                                 if gen_for_ui.load(Ordering::SeqCst) == token {
-                                    ui.set_search_results(records_model(records, &library_for_ui));
+                                    let curr_key = ui.get_current_track_key();
+                                    ui.set_search_results(records_model(
+                                        records,
+                                        &library_for_ui,
+                                        Some(&curr_key),
+                                    ));
                                 }
                             });
                         }
@@ -179,10 +186,12 @@ pub fn bind_search_controls(
             library_for_toggle.toggle_favorite(record);
             if let Some(ui) = ui_weak_fav.upgrade() {
                 let results = search_records_for_fav.lock().unwrap().clone();
-                ui.set_search_results(records_model(results, &library_for_toggle));
+                let curr_key = ui.get_current_track_key();
+                ui.set_search_results(records_model(results, &library_for_toggle, Some(&curr_key)));
                 ui.set_favorite_items(records_model(
                     library_for_toggle.favorites(),
                     &library_for_toggle,
+                    Some(&curr_key),
                 ));
                 ui.set_panel_message(slint::SharedString::from("Favorites updated"));
             }

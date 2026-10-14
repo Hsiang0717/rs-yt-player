@@ -10,7 +10,8 @@ use crate::queue::PlayQueue;
 use crate::smtc::SmtcManager;
 use crate::ui_callbacks::PendingSeekState;
 use crate::ui_models::{
-    apply_queue_expanded, queue_items_model, record_from_audio, records_model, requested_video_id,
+    apply_queue_expanded, query_video_id, queue_items_model, record_from_audio, records_model,
+    requested_video_id,
 };
 use crate::AppWindow;
 
@@ -118,7 +119,7 @@ pub async fn play_with_metadata(
                 ui.set_track_status(slint::SharedString::from("PLAYING"));
                 ui.set_can_retry(false);
                 ui.set_has_active_track(true);
-                ui.set_current_track_key(slint::SharedString::from(query_str));
+                ui.set_current_track_key(slint::SharedString::from(query_str.clone()));
                 ui.set_current_is_favorite(library_for_ui.is_favorite(&record.id));
                 ui.set_progress_ratio(if duration_secs > 0.0 {
                     start_offset_secs / duration_secs
@@ -145,8 +146,16 @@ pub async fn play_with_metadata(
                 } else {
                     ui.set_has_cover(false);
                 }
-                ui.set_favorite_items(records_model(library_for_ui.favorites(), &library_for_ui));
-                ui.set_history_items(records_model(library_for_ui.recent(), &library_for_ui));
+                ui.set_favorite_items(records_model(
+                    library_for_ui.favorites(),
+                    &library_for_ui,
+                    Some(&query_str),
+                ));
+                ui.set_history_items(records_model(
+                    library_for_ui.recent(),
+                    &library_for_ui,
+                    Some(&query_str),
+                ));
                 ui.set_queue_items(queue_items_model(&queue_for_ui, &library_for_ui));
                 ui.set_panel_message(slint::SharedString::default());
             }
@@ -189,10 +198,27 @@ pub async fn play_track(
     last_query: Arc<Mutex<Option<String>>>,
 ) {
     *last_query.lock().unwrap() = Some(query_str.clone());
+    let query_vid = query_video_id(&query_str);
+    let cached_cover = library.cover_path(&query_vid);
+    let cover_path_opt = if cached_cover.exists() {
+        Some(cached_cover)
+    } else {
+        None
+    };
     let _ = ui_weak.upgrade_in_event_loop(move |ui| {
         ui.set_is_loading(true);
         ui.set_can_retry(false);
         ui.set_track_status(slint::SharedString::from("LOADING..."));
+        if let Some(path) = cover_path_opt {
+            if let Ok(img) = slint::Image::load_from_path(&path) {
+                ui.set_cover_image(img);
+                ui.set_has_cover(true);
+            } else {
+                ui.set_has_cover(false);
+            }
+        } else {
+            ui.set_has_cover(false);
+        }
     });
 
     // Check if query is a playlist URL
@@ -256,18 +282,27 @@ pub async fn play_track(
                 meta.start_offset_secs = requested_offset_secs;
             }
             let mut cover_path = None;
-            let temp_cover_path = std::env::temp_dir().join(format!("rs_yt_cover_{}.png", meta.id));
-            if let Some(thumb_url) = &meta.thumbnail {
+            let local_cache = library.cover_path(&meta.id);
+            if local_cache.exists() {
+                cover_path = Some(local_cache);
+            } else if let Some(thumb_url) = &meta.thumbnail {
                 let client = reqwest::Client::new();
                 if let Ok(resp) = client.get(thumb_url).send().await
                     && let Ok(bytes) = resp.bytes().await
-                        && let Ok(dynamic_img) = image::load_from_memory(&bytes)
-                            && dynamic_img
-                                .save_with_format(&temp_cover_path, image::ImageFormat::Png)
-                                .is_ok()
-                            {
-                                cover_path = Some(temp_cover_path);
-                            }
+                {
+                    let temp_cover_path =
+                        std::env::temp_dir().join(format!("rs_yt_cover_{}.png", meta.id));
+                    if let Ok(dynamic_img) = image::load_from_memory(&bytes) {
+                        let _ = dynamic_img
+                            .save_with_format(&temp_cover_path, image::ImageFormat::Png);
+                        let _ = library.store_cover(&meta.id, &bytes);
+                        cover_path = if local_cache.exists() {
+                            Some(local_cache)
+                        } else {
+                            Some(temp_cover_path)
+                        };
+                    }
+                }
             }
             play_with_metadata(
                 target_query,
@@ -339,6 +374,11 @@ pub fn trigger_next(
 
     if let Some((next_query, maybe_preloaded)) = queue.pop_next() {
         info!("Advancing to next track in queue: {}", next_query);
+        let q_ui = queue.clone();
+        let l_ui = library.clone();
+        let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+            ui.set_queue_items(queue_items_model(&q_ui, &l_ui));
+        });
         let adv_lock = Arc::clone(&is_advancing);
         let abort_handle = loading_abort.clone();
         let join_handle = tokio::spawn(async move {
@@ -411,6 +451,11 @@ pub fn trigger_previous(
     *advancing = true;
     if let Some(prev_query) = queue.pop_previous() {
         info!("Switching to previous track in history: {}", prev_query);
+        let q_ui = queue.clone();
+        let l_ui = library.clone();
+        let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+            ui.set_queue_items(queue_items_model(&q_ui, &l_ui));
+        });
         let adv_lock = Arc::clone(&is_advancing);
         let abort_handle = loading_abort.clone();
         let join_handle = tokio::spawn(async move {
@@ -436,6 +481,7 @@ pub fn trigger_previous(
             }
         if let Some(ui) = ui_weak.upgrade() {
             ui.set_progress_ratio(0.0);
+            ui.set_panel_message(slint::SharedString::from("已回到當前歌曲開頭（無上一曲紀錄）"));
         }
     }
 }
