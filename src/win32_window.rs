@@ -218,6 +218,12 @@ pub unsafe fn attach_window_hooks(hwnd: HWND) {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
         );
         let _ = SetWindowSubclass(hwnd, Some(window_subclass_proc), 1001, 0);
+
+        // Ensure window is shown and focused immediately on launch (resolves initial click requirement)
+        let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_SHOW);
+        let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetActiveWindow(hwnd);
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(hwnd);
     }
 }
 
@@ -245,6 +251,8 @@ pub fn setup_windows_app_identity() {
     if let Ok(exe_path) = std::env::current_exe() {
         let exe_str = exe_path.to_string_lossy().to_string();
         std::thread::spawn(move || {
+            // Delay identity registration by 2 seconds so PowerShell does not compete with main window focus
+            std::thread::sleep(std::time::Duration::from_millis(2000));
             use std::os::windows::process::CommandExt;
             let script = format!(
                 r#"

@@ -21,6 +21,8 @@ indicatif = "0.17"
 tokio-util = { version = "0.7", features = ["io"] }
 symphonia = { version = "0.5", features = ["all"] }
 slint = "1.9"
+i-slint-backend-winit = "1.9"
+raw-window-handle = "0.6"
 tray-icon = "0.19"
 muda = "0.15"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }

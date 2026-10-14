@@ -109,6 +109,24 @@ pub fn start_playback_polling_timer(
                             hwnd
                         );
                         *guard = Some(hwnd);
+
+                        // If SMTC was initialized with a dummy window, rebind to real HWND!
+                        if let Some(smtc_arc) = &smtc_clone {
+                            if let Ok(mut lock) = smtc_arc.lock() {
+                                if lock.0.is_dummy() {
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    if let Ok(()) = lock.0.rebind_hwnd(hwnd, move |event| {
+                                        let _ = tx.send(event);
+                                    }) {
+                                        lock.1 = rx;
+                                        info!(
+                                            "Windows SMTC successfully rebound to real Slint HWND: {:?}",
+                                            hwnd
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

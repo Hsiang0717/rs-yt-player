@@ -4825,9 +4825,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures-util",
+ "i-slint-backend-winit",
  "image",
  "indicatif",
  "muda 0.15.3",
+ "raw-window-handle",
  "reqwest",
  "rodio",
  "serde",

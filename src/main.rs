@@ -30,7 +30,7 @@ use tracing_subscriber::FmtSubscriber;
 use tray::SystemTray;
 use ui_callbacks::{register_ui_callbacks, PendingSeekState};
 use ui_models::{queue_items_model, records_model};
-use win32_window::{acquire_single_instance, setup_windows_app_identity, try_find_and_hook};
+use win32_window::{acquire_single_instance, setup_windows_app_identity};
 use windows::Win32::Foundation::HWND;
 
 #[tokio::main]
@@ -65,6 +65,25 @@ async fn main() -> Result<()> {
 
     info!("Starting YouTube Audio Player in Morandi GUI mode...");
 
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
+
+    // Initialize System Tray early on main GUI thread (STA)
+    let tray = match SystemTray::new() {
+        Ok(t) => {
+            info!("System Tray icon initialized successfully.");
+            #[allow(clippy::arc_with_non_send_sync)]
+            Some(Arc::new(t))
+        }
+        Err(e) => {
+            error!("Failed to initialize System Tray: {:#}", e);
+            None
+        }
+    };
+
     let app = AppWindow::new()?;
     // Initialize yt-dlp first so the player uses the exact binary selected by Extractor.
     let extractor = Arc::new(Extractor::new().await?);
@@ -87,50 +106,29 @@ async fn main() -> Result<()> {
     app.set_history_items(records_model(library.recent(), &library));
     app.set_queue_items(queue_items_model(&play_queue, &library));
 
-    // Initialize System Tray (kept on main thread event loop)
-    let tray = match SystemTray::new() {
-        Ok(t) => {
-            info!("System Tray icon initialized successfully.");
-            #[allow(clippy::arc_with_non_send_sync)]
-            Some(Arc::new(t))
-        }
-        Err(e) => {
-            error!("Failed to initialize System Tray: {:#}", e);
-            None
-        }
-    };
-
     // Show initial window so Windows creates the HWND
     app.show()?;
 
-    // Find and subclass the Slint window HWND to hook minimize -> tray
-    let main_hwnd: Arc<Mutex<Option<HWND>>> = Arc::new(Mutex::new(None));
-    unsafe {
-        for _ in 0..20 {
-            if let Some(hwnd) = try_find_and_hook() {
-                info!(
-                    "Attached Win32 minimize-to-tray subclass to HWND: {:?}",
-                    hwnd
-                );
-                *main_hwnd.lock().unwrap() = Some(hwnd);
-                break;
+    use i_slint_backend_winit::WinitWindowAccessor;
+    let initial_hwnd: Option<HWND> = app.window().with_winit_window(|winit_window| {
+        use raw_window_handle::HasWindowHandle;
+        if let Ok(handle) = winit_window.window_handle() {
+            if let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() {
+                return Some(HWND(h.hwnd.get() as _));
             }
-            let mut msg = std::mem::zeroed();
-            while windows::Win32::UI::WindowsAndMessaging::PeekMessageW(
-                &mut msg,
-                None,
-                0,
-                0,
-                windows::Win32::UI::WindowsAndMessaging::PM_REMOVE,
-            )
-            .as_bool()
-            {
-                let _ = windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
-                windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        None
+    }).flatten();
+
+    info!("Directly obtained Slint HWND via WinitWindowAccessor: {:?}", initial_hwnd);
+    if let Some(hwnd) = initial_hwnd {
+        unsafe {
+            win32_window::attach_window_hooks(hwnd);
         }
     }
+
+    // Subclass the Slint window HWND to hook minimize -> tray
+    let main_hwnd: Arc<Mutex<Option<HWND>>> = Arc::new(Mutex::new(initial_hwnd));
 
     // Initialize Windows SMTC (System Media Transport Controls)
     let initial_hwnd = *main_hwnd.lock().unwrap();

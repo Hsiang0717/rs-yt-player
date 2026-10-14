@@ -76,6 +76,36 @@ impl SmtcManager {
         })
     }
 
+    pub fn is_dummy(&self) -> bool {
+        self.owns_hwnd
+    }
+
+    pub fn rebind_hwnd<F>(&mut self, new_hwnd: HWND, handler: F) -> Result<()>
+    where
+        F: Fn(MediaControlEvent) + Send + 'static,
+    {
+        if self.owns_hwnd && self.hwnd.0 != 0 {
+            unsafe {
+                let _ = DestroyWindow(self.hwnd);
+            }
+            self.owns_hwnd = false;
+        }
+        self.hwnd = new_hwnd;
+        let hwnd_raw = new_hwnd.0 as *mut std::ffi::c_void;
+        let config = PlatformConfig {
+            dbus_name: "YouTubeAudioPlayer",
+            display_name: "YouTube Audio Player",
+            hwnd: Some(hwnd_raw),
+        };
+        let mut controls = MediaControls::new(config)
+            .map_err(|e| anyhow::anyhow!("Failed to rebind Windows SMTC: {:?}", e))?;
+        controls
+            .attach(handler)
+            .map_err(|e| anyhow::anyhow!("Failed to attach rebound SMTC handler: {:?}", e))?;
+        self.controls = controls;
+        Ok(())
+    }
+
     pub fn attach<F>(&mut self, handler: F) -> Result<()>
     where
         F: Fn(MediaControlEvent) + Send + 'static,
