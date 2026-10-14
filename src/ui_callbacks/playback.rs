@@ -1,6 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use tracing::info;
 
 use crate::playback_coordinator::SmtcHandle;
@@ -66,7 +65,7 @@ pub fn bind_playback_controls(
         player_for_stop.stop();
         if let Some(smtc_arc) = &smtc_for_stop
             && let Ok(mut lock) = smtc_arc.lock() {
-                lock.0.set_playback(false);
+                lock.set_stopped();
             }
         if let Some(ui) = ui_weak_stop.upgrade() {
             ui.set_is_playing(false);
@@ -86,6 +85,8 @@ pub fn bind_seek_and_volume_controls(
     player: Arc<AudioPlayer>,
     smtc: SmtcHandle,
     pending_seek: Arc<Mutex<Option<PendingSeekState>>>,
+    seek_seq: Arc<AtomicU64>,
+    seek_lock: Arc<tokio::sync::Mutex<()>>,
 ) {
     let player_for_scrub = Arc::clone(&player);
     let ui_weak_scrub = app.as_weak();
@@ -106,8 +107,6 @@ pub fn bind_seek_and_volume_controls(
         }
     });
 
-    let seek_seq = Arc::new(AtomicU64::new(0));
-    let seek_lock = Arc::new(tokio::sync::Mutex::new(()));
     let player_for_seek = Arc::clone(&player);
     let ui_weak_seek = app.as_weak();
     let smtc_for_seek = smtc;
@@ -115,70 +114,15 @@ pub fn bind_seek_and_volume_controls(
     let seek_seq_for_seek = Arc::clone(&seek_seq);
     let seek_lock_for_seek = Arc::clone(&seek_lock);
     app.on_on_user_seek(move |ratio| {
-        let current_seq = seek_seq_for_seek.fetch_add(1, Ordering::SeqCst) + 1;
-        let total_dur = player_for_seek.total_duration();
-        let target_secs = ratio * total_dur;
-        info!(
-            "Executing user seek #{} to {:.1}s ({:.1}%)",
-            current_seq,
-            target_secs,
-            ratio * 100.0
+        crate::playback_coordinator::trigger_seek_to_ratio(
+            ratio,
+            Arc::clone(&player_for_seek),
+            smtc_for_seek.clone(),
+            ui_weak_seek.clone(),
+            pending_seek_for_seek.clone(),
+            Arc::clone(&seek_seq_for_seek),
+            Arc::clone(&seek_lock_for_seek),
         );
-
-        if let Some(ui) = ui_weak_seek.upgrade() {
-            ui.set_progress_ratio(ratio);
-            let cur_m = (target_secs as u64) / 60;
-            let cur_s = (target_secs as u64) % 60;
-            let tot_m = (total_dur as u64) / 60;
-            let tot_s = (total_dur as u64) % 60;
-            ui.set_time_current(slint::SharedString::from(format!("{:02}:{:02}", cur_m, cur_s)));
-            ui.set_time_total(slint::SharedString::from(format!("{:02}:{:02}", tot_m, tot_s)));
-            ui.set_time_display(slint::SharedString::from(format!(
-                "{:02}:{:02} / {:02}:{:02}",
-                cur_m, cur_s, tot_m, tot_s
-            )));
-            ui.set_track_status(slint::SharedString::from("BUFFERING"));
-        }
-
-        *pending_seek_for_seek.lock().unwrap() = Some(PendingSeekState {
-            id: current_seq,
-            target_ratio: ratio,
-            target_secs,
-            requested_at: Instant::now(),
-        });
-
-        let player = Arc::clone(&player_for_seek);
-        let ui_weak = ui_weak_seek.clone();
-        let smtc = smtc_for_seek.clone();
-        let pending_seek = Arc::clone(&pending_seek_for_seek);
-        let seek_seq = Arc::clone(&seek_seq_for_seek);
-        let seek_lock = Arc::clone(&seek_lock_for_seek);
-
-        tokio::spawn(async move {
-            let _guard = seek_lock.lock().await;
-            if seek_seq.load(Ordering::SeqCst) != current_seq {
-                return;
-            }
-
-            let result = tokio::task::spawn_blocking(move || player.seek_to(target_secs)).await;
-            if seek_seq.load(Ordering::SeqCst) == current_seq {
-                if matches!(result, Ok(Ok(()))) {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_is_playing(true);
-                        ui.set_track_status(slint::SharedString::from("PLAYING"));
-                    }
-                    if let Some(smtc_arc) = &smtc
-                        && let Ok(mut lock) = smtc_arc.lock() {
-                            lock.0.set_playback(true);
-                        }
-                }
-                let mut lock = pending_seek.lock().unwrap();
-                if let Some(p) = lock.as_ref()
-                    && p.id == current_seq {
-                        *lock = None;
-                    }
-            }
-        });
     });
 
     let player_for_vol = Arc::clone(&player);

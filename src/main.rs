@@ -132,19 +132,14 @@ async fn main() -> Result<()> {
 
     // Initialize Windows SMTC (System Media Transport Controls)
     let initial_hwnd = *main_hwnd.lock().unwrap();
-    let smtc: playback_coordinator::SmtcHandle = match SmtcManager::new(initial_hwnd) {
-        Ok(mut manager) => {
-            let (tx, rx) = std::sync::mpsc::channel();
-            if let Ok(()) = manager.attach(move |event| {
-                let _ = tx.send(event);
-            }) {
-                info!("Windows SMTC successfully attached.");
-            }
-            Some(Arc::new(Mutex::new((manager, rx))))
+    let (smtc, smtc_rx) = match SmtcManager::new(initial_hwnd) {
+        Ok((manager, rx)) => {
+            info!("Windows SMTC successfully attached.");
+            (Some(Arc::new(Mutex::new(manager))), Some(rx))
         }
         Err(e) => {
             info!("SMTC initialization note (non-critical): {:#}", e);
-            None
+            (None, None)
         }
     };
 
@@ -155,6 +150,8 @@ async fn main() -> Result<()> {
     let last_query = Arc::new(Mutex::new(None::<String>));
     let pending_seek = Arc::new(Mutex::new(Option::<PendingSeekState>::None));
     let search_records = Arc::new(Mutex::new(Vec::<TrackRecord>::new()));
+    let seek_seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let seek_lock = Arc::new(tokio::sync::Mutex::new(()));
 
     // Register all Slint GUI callbacks
     register_ui_callbacks(
@@ -170,6 +167,8 @@ async fn main() -> Result<()> {
         Arc::clone(&pending_seek),
         Arc::clone(&search_records),
         Arc::clone(&main_hwnd),
+        Arc::clone(&seek_seq),
+        Arc::clone(&seek_lock),
     );
 
     // Start background polling timer
@@ -181,12 +180,15 @@ async fn main() -> Result<()> {
         library,
         tray,
         smtc,
+        smtc_rx,
         Arc::clone(&main_hwnd),
         Arc::clone(&is_auto_advancing),
         Arc::clone(&last_query),
         Arc::clone(&current_loading_abort),
         Arc::clone(&pending_seek),
         stream,
+        seek_seq,
+        seek_lock,
     );
 
     // Run Slint Event Loop

@@ -1,5 +1,6 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{error, info};
 
 use crate::extractor::{AudioMetadata, Extractor};
@@ -7,13 +8,13 @@ use crate::library::{LibraryStore, RepeatMode};
 use crate::player::AudioPlayer;
 use crate::queue::PlayQueue;
 use crate::smtc::SmtcManager;
+use crate::ui_callbacks::PendingSeekState;
 use crate::ui_models::{
     apply_queue_expanded, queue_items_model, record_from_audio, records_model, requested_video_id,
 };
 use crate::AppWindow;
-use souvlaki::MediaControlEvent;
 
-pub type SmtcHandle = Option<Arc<Mutex<(SmtcManager, std::sync::mpsc::Receiver<MediaControlEvent>)>>>;
+pub type SmtcHandle = Option<Arc<Mutex<SmtcManager>>>;
 pub type LoadingAbortHandle = Arc<Mutex<Option<tokio::task::AbortHandle>>>;
 
 /// Play track directly from pre-extracted metadata and cover image
@@ -87,7 +88,7 @@ pub async fn play_with_metadata(
     // Update Windows SMTC if available
     if let Some(smtc_arc) = &smtc
         && let Ok(mut lock) = smtc_arc.lock() {
-            lock.0.set_metadata(
+            lock.set_metadata(
                 &title,
                 &uploader,
                 if duration_secs > 0.0 {
@@ -95,8 +96,12 @@ pub async fn play_with_metadata(
                 } else {
                     None
                 },
+                cover_path.as_deref(),
             );
-            lock.0.set_playback(playback_succeeded);
+            lock.set_playback(
+                playback_succeeded,
+                Some(Duration::from_secs_f32(start_offset_secs)),
+            );
         }
 
     let queue_for_ui = queue.clone();
@@ -427,7 +432,7 @@ pub fn trigger_previous(
         let _ = player.seek_to(0.0);
         if let Some(smtc_arc) = &smtc
             && let Ok(mut lock) = smtc_arc.lock() {
-                lock.0.set_playback(true);
+                lock.set_playback(true, Some(Duration::ZERO));
             }
         if let Some(ui) = ui_weak.upgrade() {
             ui.set_progress_ratio(0.0);
@@ -475,12 +480,13 @@ pub fn trigger_toggle_play_pause(
     }
 
     let is_paused = player.is_paused();
-    if !is_paused {
+    if !is_paused && player.is_active() {
         // Pausing is instantaneous and synchronous
+        let cur_pos = player.current_position();
         player.pause();
         if let Some(smtc_arc) = &smtc
             && let Ok(mut lock) = smtc_arc.lock() {
-                lock.0.set_playback(false);
+                lock.set_playback(false, Some(Duration::from_secs_f32(cur_pos)));
             }
         let _ = ui_weak.upgrade_in_event_loop(|ui| {
             ui.set_is_playing(false);
@@ -490,10 +496,11 @@ pub fn trigger_toggle_play_pause(
         // Resuming: check if direct unpause is safe or if background refresh is required
         let needs_refresh = player.is_stream_expired_or_stale() || crate::win32_window::take_system_resumed();
         if !needs_refresh {
+            let cur_pos = player.current_position();
             player.resume_direct();
             if let Some(smtc_arc) = &smtc
                 && let Ok(mut lock) = smtc_arc.lock() {
-                    lock.0.set_playback(true);
+                    lock.set_playback(true, Some(Duration::from_secs_f32(cur_pos)));
                 }
             let _ = ui_weak.upgrade_in_event_loop(|ui| {
                 ui.set_is_playing(true);
@@ -561,7 +568,7 @@ pub fn trigger_toggle_play_pause(
                         info!("Stream resumed successfully at {:.1}s.", current_pos);
                         if let Some(smtc_arc) = &smtc_clone
                             && let Ok(mut lock) = smtc_arc.lock() {
-                                lock.0.set_playback(true);
+                                lock.set_playback(true, Some(Duration::from_secs_f32(current_pos)));
                             }
                         let _ = ui_weak_clone.upgrade_in_event_loop(|ui| {
                             ui.set_is_loading(false);
@@ -585,4 +592,106 @@ pub fn trigger_toggle_play_pause(
             });
         }
     }
+}
+
+pub fn trigger_seek_to_ratio(
+    ratio: f32,
+    player: Arc<AudioPlayer>,
+    smtc: SmtcHandle,
+    ui_weak: slint::Weak<AppWindow>,
+    pending_seek: Arc<Mutex<Option<PendingSeekState>>>,
+    seek_seq: Arc<AtomicU64>,
+    seek_lock: Arc<tokio::sync::Mutex<()>>,
+) {
+    let ratio = ratio.clamp(0.0, 1.0);
+    let current_seq = seek_seq.fetch_add(1, Ordering::SeqCst) + 1;
+    let total_dur = player.total_duration();
+    let target_secs = ratio * total_dur;
+    info!(
+        "Executing seek #{} to {:.1}s ({:.1}%)",
+        current_seq,
+        target_secs,
+        ratio * 100.0
+    );
+
+    if let Some(ui) = ui_weak.upgrade() {
+        ui.set_progress_ratio(ratio);
+        let cur_m = (target_secs as u64) / 60;
+        let cur_s = (target_secs as u64) % 60;
+        let tot_m = (total_dur as u64) / 60;
+        let tot_s = (total_dur as u64) % 60;
+        ui.set_time_current(slint::SharedString::from(format!("{:02}:{:02}", cur_m, cur_s)));
+        ui.set_time_total(slint::SharedString::from(format!("{:02}:{:02}", tot_m, tot_s)));
+        ui.set_time_display(slint::SharedString::from(format!(
+            "{:02}:{:02} / {:02}:{:02}",
+            cur_m, cur_s, tot_m, tot_s
+        )));
+        ui.set_track_status(slint::SharedString::from("BUFFERING"));
+    }
+
+    *pending_seek.lock().unwrap() = Some(PendingSeekState {
+        id: current_seq,
+        target_ratio: ratio,
+        target_secs,
+        requested_at: Instant::now(),
+    });
+
+    let player_clone = Arc::clone(&player);
+    let ui_weak_clone = ui_weak.clone();
+    let smtc_clone = smtc.clone();
+    let pending_seek_clone = Arc::clone(&pending_seek);
+    let seek_seq_clone = Arc::clone(&seek_seq);
+    let seek_lock_clone = Arc::clone(&seek_lock);
+
+    tokio::spawn(async move {
+        let _guard = seek_lock_clone.lock().await;
+        if seek_seq_clone.load(Ordering::SeqCst) != current_seq {
+            return;
+        }
+
+        let result = tokio::task::spawn_blocking(move || player_clone.seek_to(target_secs)).await;
+        if seek_seq_clone.load(Ordering::SeqCst) == current_seq {
+            if matches!(result, Ok(Ok(()))) {
+                if let Some(ui) = ui_weak_clone.upgrade() {
+                    ui.set_is_playing(true);
+                    ui.set_track_status(slint::SharedString::from("PLAYING"));
+                }
+                if let Some(smtc_arc) = &smtc_clone
+                    && let Ok(mut lock) = smtc_arc.lock() {
+                        lock.set_playback(true, Some(Duration::from_secs_f32(target_secs)));
+                    }
+            }
+            let mut lock = pending_seek_clone.lock().unwrap();
+            if let Some(p) = lock.as_ref()
+                && p.id == current_seq {
+                    *lock = None;
+                }
+        }
+    });
+}
+
+pub fn trigger_seek_to_secs(
+    target_secs: f32,
+    player: Arc<AudioPlayer>,
+    smtc: SmtcHandle,
+    ui_weak: slint::Weak<AppWindow>,
+    pending_seek: Arc<Mutex<Option<PendingSeekState>>>,
+    seek_seq: Arc<AtomicU64>,
+    seek_lock: Arc<tokio::sync::Mutex<()>>,
+) {
+    let total_dur = player.total_duration();
+    if total_dur <= 0.0 {
+        return;
+    }
+    let target_secs = target_secs.clamp(0.0, total_dur);
+    let ratio = target_secs / total_dur;
+    trigger_seek_to_ratio(
+        ratio,
+        player,
+        smtc,
+        ui_weak,
+        pending_seek,
+        seek_seq,
+        seek_lock,
+    );
 }

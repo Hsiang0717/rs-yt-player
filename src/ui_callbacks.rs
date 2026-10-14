@@ -109,6 +109,8 @@ pub fn register_ui_callbacks(
     pending_seek: Arc<Mutex<Option<PendingSeekState>>>,
     search_records: Arc<Mutex<Vec<TrackRecord>>>,
     main_hwnd: Arc<Mutex<Option<windows::Win32::Foundation::HWND>>>,
+    seek_seq: Arc<std::sync::atomic::AtomicU64>,
+    seek_lock: Arc<tokio::sync::Mutex<()>>,
 ) {
     let ctx = PlaybackContext {
         player: Arc::clone(&player),
@@ -127,5 +129,5 @@ pub fn register_ui_callbacks(
     library::bind_library_controls(app, ctx.clone(), search_records);
     queue::bind_queue_controls(app, ctx.clone(), Arc::clone(&is_auto_advancing));
     playback::bind_playback_controls(app, ctx, is_auto_advancing);
-    playback::bind_seek_and_volume_controls(app, player, smtc, pending_seek);
+    playback::bind_seek_and_volume_controls(app, player, smtc, pending_seek, seek_seq, seek_lock);
 }

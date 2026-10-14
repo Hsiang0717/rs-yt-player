@@ -101,7 +101,7 @@ pub async fn run_cli_mode(raw_args: Vec<String>, is_smoke_test: bool) -> Result<
 
     // Attach SMTC in CLI / Smoke mode for end-to-end SMTC verification
     #[cfg(target_os = "windows")]
-    let mut smtc = crate::smtc::SmtcManager::new(None).ok();
+    let mut smtc = crate::smtc::SmtcManager::new(None).ok().map(|(m, _rx)| m);
     #[cfg(target_os = "windows")]
     if let Some(s) = &mut smtc {
         s.set_metadata(
@@ -112,8 +112,9 @@ pub async fn run_cli_mode(raw_args: Vec<String>, is_smoke_test: bool) -> Result<
             } else {
                 None
             },
+            None,
         );
-        s.set_playback(true);
+        s.set_playback(true, Some(std::time::Duration::from_secs_f32(start_offset_secs)));
         println!("Windows SMTC active: Metadata and playback set to Playing.");
     }
 
@@ -151,14 +152,14 @@ pub async fn run_cli_mode(raw_args: Vec<String>, is_smoke_test: bool) -> Result<
         player.pause();
         #[cfg(target_os = "windows")]
         if let Some(s) = &mut smtc {
-            s.set_playback(false);
+            s.set_playback(false, Some(std::time::Duration::from_secs_f32(player.current_position())));
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         println!("Smoke test: Testing resume...");
         player.resume();
         #[cfg(target_os = "windows")]
         if let Some(s) = &mut smtc {
-            s.set_playback(true);
+            s.set_playback(true, Some(std::time::Duration::from_secs_f32(player.current_position())));
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         println!("Smoke test: Testing seek to 30s...");
@@ -167,6 +168,10 @@ pub async fn run_cli_mode(raw_args: Vec<String>, is_smoke_test: bool) -> Result<
             let _ = player_seek.seek_to(30.0);
         })
         .await?;
+        #[cfg(target_os = "windows")]
+        if let Some(s) = &mut smtc {
+            s.set_playback(true, Some(std::time::Duration::from_secs(30)));
+        }
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         let player_stop = player.clone();
         tokio::task::spawn_blocking(move || {
@@ -175,7 +180,7 @@ pub async fn run_cli_mode(raw_args: Vec<String>, is_smoke_test: bool) -> Result<
         .await?;
         #[cfg(target_os = "windows")]
         if let Some(s) = &mut smtc {
-            s.set_playback(false);
+            s.set_stopped();
         }
         println!("Smoke test completed successfully!");
         return Ok(());

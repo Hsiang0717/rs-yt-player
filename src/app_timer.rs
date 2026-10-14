@@ -1,5 +1,6 @@
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::info;
 
 use muda::MenuEvent;
@@ -13,7 +14,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::extractor::Extractor;
 use crate::library::LibraryStore;
 use crate::playback_coordinator::{
-    trigger_next, trigger_previous, trigger_toggle_play_pause, LoadingAbortHandle, SmtcHandle,
+    trigger_next, trigger_previous, trigger_seek_to_secs, trigger_toggle_play_pause,
+    LoadingAbortHandle, SmtcHandle,
 };
 use crate::player::AudioPlayer;
 use crate::queue::PlayQueue;
@@ -32,12 +34,15 @@ pub fn start_playback_polling_timer(
     library: LibraryStore,
     tray: Option<Arc<SystemTray>>,
     smtc: SmtcHandle,
+    smtc_rx: Option<std::sync::mpsc::Receiver<MediaControlEvent>>,
     main_hwnd: Arc<Mutex<Option<HWND>>>,
     is_auto_advancing: Arc<Mutex<bool>>,
     last_query: Arc<Mutex<Option<String>>>,
     current_loading_abort: LoadingAbortHandle,
     pending_seek: Arc<Mutex<Option<PendingSeekState>>>,
     audio_stream: rodio::OutputStream,
+    seek_seq: Arc<AtomicU64>,
+    seek_lock: Arc<tokio::sync::Mutex<()>>,
 ) -> slint::Timer {
     let timer = slint::Timer::default();
     let tray_clone = tray;
@@ -52,8 +57,11 @@ pub fn start_playback_polling_timer(
     let last_query_for_timer = Arc::clone(&last_query);
     let loading_abort_for_timer = Arc::clone(&current_loading_abort);
     let pending_seek_for_timer = Arc::clone(&pending_seek);
+    let seek_seq_for_timer = seek_seq;
+    let seek_lock_for_timer = seek_lock;
     let mut queue_display_snapshot = Vec::<String>::new();
     let mut stream_error_displayed = false;
+    let mut last_smtc_sync = Instant::now();
     #[allow(unused_assignments)]
     let mut active_audio_stream: Option<rodio::OutputStream> = Some(audio_stream);
 
@@ -65,6 +73,7 @@ pub fn start_playback_polling_timer(
             // Check for system sleep suspension event
             if crate::win32_window::take_system_suspended() && !player_for_timer.is_paused() {
                 info!("System sleep detected: auto-pausing playback to preserve position.");
+                let cur_pos = player_for_timer.current_position();
                 player_for_timer.pause();
                 if let Some(ui) = ui_weak_timer.upgrade() {
                     ui.set_is_playing(false);
@@ -72,7 +81,7 @@ pub fn start_playback_polling_timer(
                 }
                 if let Some(smtc_arc) = &smtc_clone
                     && let Ok(mut lock) = smtc_arc.lock() {
-                        lock.0.set_playback(false);
+                        lock.set_playback(false, Some(Duration::from_secs_f32(cur_pos)));
                     }
             }
 
@@ -113,12 +122,8 @@ pub fn start_playback_polling_timer(
                         // If SMTC was initialized with a dummy window, rebind to real HWND!
                         if let Some(smtc_arc) = &smtc_clone {
                             if let Ok(mut lock) = smtc_arc.lock() {
-                                if lock.0.is_dummy() {
-                                    let (tx, rx) = std::sync::mpsc::channel();
-                                    if let Ok(()) = lock.0.rebind_hwnd(hwnd, move |event| {
-                                        let _ = tx.send(event);
-                                    }) {
-                                        lock.1 = rx;
+                                if lock.is_dummy() {
+                                    if let Ok(()) = lock.rebind_hwnd(hwnd) {
                                         info!(
                                             "Windows SMTC successfully rebound to real Slint HWND: {:?}",
                                             hwnd
@@ -179,33 +184,11 @@ pub fn start_playback_polling_timer(
             }
 
             // 3. Process Windows SMTC Media Key Events
-            if let Some(smtc_arc) = &smtc_clone
-                && let Ok(mut lock) = smtc_arc.try_lock() {
-                    while let Ok(event) = lock.1.try_recv() {
-                        match event {
-                            MediaControlEvent::Play => {
-                                if player_for_timer.is_paused() {
-                                    trigger_toggle_play_pause(
-                                        Arc::clone(&player_for_timer),
-                                        Arc::clone(&extractor_for_timer),
-                                        smtc_clone.clone(),
-                                        ui_weak_timer.clone(),
-                                        Arc::clone(&last_query_for_timer),
-                                    );
-                                }
-                            }
-                            MediaControlEvent::Pause => {
-                                if !player_for_timer.is_paused() {
-                                    trigger_toggle_play_pause(
-                                        Arc::clone(&player_for_timer),
-                                        Arc::clone(&extractor_for_timer),
-                                        smtc_clone.clone(),
-                                        ui_weak_timer.clone(),
-                                        Arc::clone(&last_query_for_timer),
-                                    );
-                                }
-                            }
-                            MediaControlEvent::Toggle => {
+            if let Some(rx) = &smtc_rx {
+                while let Ok(event) = rx.try_recv() {
+                    match event {
+                        MediaControlEvent::Play => {
+                            if !player_for_timer.is_active() {
                                 trigger_toggle_play_pause(
                                     Arc::clone(&player_for_timer),
                                     Arc::clone(&extractor_for_timer),
@@ -214,45 +197,124 @@ pub fn start_playback_polling_timer(
                                     Arc::clone(&last_query_for_timer),
                                 );
                             }
-                            MediaControlEvent::Next => {
-                                trigger_next(
-                                    Arc::clone(&extractor_for_timer),
-                                    Arc::clone(&player_for_timer),
-                                    smtc_clone.clone(),
-                                    ui_weak_timer.clone(),
-                                    queue_for_timer.clone(),
-                                    library_for_timer.clone(),
-                                    Arc::clone(&is_auto_advancing_timer),
-                                    false,
-                                    Arc::clone(&last_query_for_timer),
-                                    loading_abort_for_timer.clone(),
-                                );
-                            }
-                            MediaControlEvent::Previous => {
-                                trigger_previous(
-                                    Arc::clone(&extractor_for_timer),
-                                    Arc::clone(&player_for_timer),
-                                    smtc_clone.clone(),
-                                    ui_weak_timer.clone(),
-                                    queue_for_timer.clone(),
-                                    library_for_timer.clone(),
-                                    Arc::clone(&is_auto_advancing_timer),
-                                    Arc::clone(&last_query_for_timer),
-                                    loading_abort_for_timer.clone(),
-                                );
-                            }
-                            MediaControlEvent::Stop => {
-                                player_for_timer.stop();
-                                lock.0.set_playback(false);
-                                if let Some(ui) = ui_weak_timer.upgrade() {
-                                    ui.set_is_playing(false);
-                                    ui.set_track_status(slint::SharedString::from("STOPPED"));
-                                }
-                            }
-                            _ => {}
                         }
+                        MediaControlEvent::Pause => {
+                            if player_for_timer.is_active() {
+                                trigger_toggle_play_pause(
+                                    Arc::clone(&player_for_timer),
+                                    Arc::clone(&extractor_for_timer),
+                                    smtc_clone.clone(),
+                                    ui_weak_timer.clone(),
+                                    Arc::clone(&last_query_for_timer),
+                                );
+                            }
+                        }
+                        MediaControlEvent::Toggle => {
+                            trigger_toggle_play_pause(
+                                Arc::clone(&player_for_timer),
+                                Arc::clone(&extractor_for_timer),
+                                smtc_clone.clone(),
+                                ui_weak_timer.clone(),
+                                Arc::clone(&last_query_for_timer),
+                            );
+                        }
+                        MediaControlEvent::Next => {
+                            trigger_next(
+                                Arc::clone(&extractor_for_timer),
+                                Arc::clone(&player_for_timer),
+                                smtc_clone.clone(),
+                                ui_weak_timer.clone(),
+                                queue_for_timer.clone(),
+                                library_for_timer.clone(),
+                                Arc::clone(&is_auto_advancing_timer),
+                                false,
+                                Arc::clone(&last_query_for_timer),
+                                loading_abort_for_timer.clone(),
+                            );
+                        }
+                        MediaControlEvent::Previous => {
+                            trigger_previous(
+                                Arc::clone(&extractor_for_timer),
+                                Arc::clone(&player_for_timer),
+                                smtc_clone.clone(),
+                                ui_weak_timer.clone(),
+                                queue_for_timer.clone(),
+                                library_for_timer.clone(),
+                                Arc::clone(&is_auto_advancing_timer),
+                                Arc::clone(&last_query_for_timer),
+                                loading_abort_for_timer.clone(),
+                            );
+                        }
+                        MediaControlEvent::Stop => {
+                            if let Ok(mut guard) = loading_abort_for_timer.lock()
+                                && let Some(handle) = guard.take() {
+                                    handle.abort();
+                                }
+                            player_for_timer.stop();
+                            if let Some(smtc_arc) = &smtc_clone
+                                && let Ok(mut lock) = smtc_arc.lock() {
+                                    lock.set_stopped();
+                                }
+                            if let Some(ui) = ui_weak_timer.upgrade() {
+                                ui.set_is_playing(false);
+                                ui.set_can_retry(false);
+                                ui.set_track_status(slint::SharedString::from("STOPPED"));
+                                ui.set_progress_ratio(0.0);
+                                ui.set_buffer_ratio(0.0);
+                                ui.set_time_current(slint::SharedString::from("00:00"));
+                                ui.set_time_total(slint::SharedString::from("00:00"));
+                                ui.set_time_display(slint::SharedString::from("00:00 / 00:00"));
+                            }
+                        }
+                        MediaControlEvent::SetPosition(pos) => {
+                            trigger_seek_to_secs(
+                                pos.0.as_secs_f32(),
+                                Arc::clone(&player_for_timer),
+                                smtc_clone.clone(),
+                                ui_weak_timer.clone(),
+                                pending_seek_for_timer.clone(),
+                                Arc::clone(&seek_seq_for_timer),
+                                Arc::clone(&seek_lock_for_timer),
+                            );
+                        }
+                        MediaControlEvent::Seek(direction) => {
+                            let current_pos = player_for_timer.current_position();
+                            let delta = 10.0;
+                            let target = match direction {
+                                souvlaki::SeekDirection::Forward => current_pos + delta,
+                                souvlaki::SeekDirection::Backward => (current_pos - delta).max(0.0),
+                            };
+                            trigger_seek_to_secs(
+                                target,
+                                Arc::clone(&player_for_timer),
+                                smtc_clone.clone(),
+                                ui_weak_timer.clone(),
+                                pending_seek_for_timer.clone(),
+                                Arc::clone(&seek_seq_for_timer),
+                                Arc::clone(&seek_lock_for_timer),
+                            );
+                        }
+                        MediaControlEvent::SeekBy(direction, amount) => {
+                            let current_pos = player_for_timer.current_position();
+                            let delta = amount.as_secs_f32();
+                            let target = match direction {
+                                souvlaki::SeekDirection::Forward => current_pos + delta,
+                                souvlaki::SeekDirection::Backward => (current_pos - delta).max(0.0),
+                            };
+                            trigger_seek_to_secs(
+                                target,
+                                Arc::clone(&player_for_timer),
+                                smtc_clone.clone(),
+                                ui_weak_timer.clone(),
+                                pending_seek_for_timer.clone(),
+                                Arc::clone(&seek_seq_for_timer),
+                                Arc::clone(&seek_lock_for_timer),
+                            );
+                        }
+                        _ => {}
                     }
                 }
+            }
 
             // 4. Update Playback Progress Bar (Only when user is NOT dragging)
             if !player_for_timer.is_paused() {
@@ -272,7 +334,7 @@ pub fn start_playback_polling_timer(
                         }
                         if let Some(smtc_arc) = &smtc_clone
                             && let Ok(mut lock) = smtc_arc.lock() {
-                                lock.0.set_playback(false);
+                                lock.set_playback(false, Some(Duration::from_secs_f32(player_for_timer.current_position())));
                             }
                     }
                 } else {
@@ -340,6 +402,17 @@ pub fn start_playback_polling_timer(
                             ui.set_buffer_ratio(buf_ratio);
                         }
                     }
+
+                // Periodically synchronize SMTC timeline position to prevent drift
+                if player_for_timer.is_active() && !is_pending_seek && total_dur > 0.0 {
+                    if last_smtc_sync.elapsed() >= Duration::from_secs(4) {
+                        last_smtc_sync = Instant::now();
+                        if let Some(smtc_arc) = &smtc_clone
+                            && let Ok(mut lock) = smtc_arc.try_lock() {
+                                lock.set_playback(true, Some(Duration::from_secs_f32(current_pos)));
+                            }
+                    }
+                }
 
                 // 5. Gapless Preload: Pre-fetch next track when <= 10s remaining
                 if total_dur > 15.0 && (total_dur - current_pos) <= 10.0 {

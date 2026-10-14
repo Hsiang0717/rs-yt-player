@@ -1,5 +1,7 @@
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use anyhow::Result;
-use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
+use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, WNDCLASSW, WS_OVERLAPPEDWINDOW,
@@ -10,6 +12,9 @@ pub struct SmtcManager {
     controls: MediaControls,
     hwnd: HWND,
     owns_hwnd: bool,
+    tx: std::sync::mpsc::Sender<MediaControlEvent>,
+    last_metadata: Option<(String, String, Option<Duration>, Option<PathBuf>)>,
+    last_playback: Option<(bool, Option<Duration>)>,
 }
 
 unsafe extern "system" fn dummy_wnd_proc(
@@ -22,7 +27,7 @@ unsafe extern "system" fn dummy_wnd_proc(
 }
 
 impl SmtcManager {
-    pub fn new(target_hwnd: Option<HWND>) -> Result<Self> {
+    pub fn new(target_hwnd: Option<HWND>) -> Result<(Self, std::sync::mpsc::Receiver<MediaControlEvent>)> {
         let (hwnd, owns_hwnd) = if let Some(h) = target_hwnd {
             (h, false)
         } else {
@@ -66,24 +71,35 @@ impl SmtcManager {
             hwnd: Some(hwnd_raw),
         };
 
-        let controls = MediaControls::new(config)
+        let mut controls = MediaControls::new(config)
             .map_err(|e| anyhow::anyhow!("Failed to initialize Windows SMTC: {:?}", e))?;
 
-        Ok(Self {
-            controls,
-            hwnd,
-            owns_hwnd,
-        })
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx_clone = tx.clone();
+        controls
+            .attach(move |event| {
+                let _ = tx_clone.send(event);
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to attach SMTC handler: {:?}", e))?;
+
+        Ok((
+            Self {
+                controls,
+                hwnd,
+                owns_hwnd,
+                tx,
+                last_metadata: None,
+                last_playback: None,
+            },
+            rx,
+        ))
     }
 
     pub fn is_dummy(&self) -> bool {
         self.owns_hwnd
     }
 
-    pub fn rebind_hwnd<F>(&mut self, new_hwnd: HWND, handler: F) -> Result<()>
-    where
-        F: Fn(MediaControlEvent) + Send + 'static,
-    {
+    pub fn rebind_hwnd(&mut self, new_hwnd: HWND) -> Result<()> {
         if self.owns_hwnd && self.hwnd.0 != 0 {
             unsafe {
                 let _ = DestroyWindow(self.hwnd);
@@ -99,20 +115,21 @@ impl SmtcManager {
         };
         let mut controls = MediaControls::new(config)
             .map_err(|e| anyhow::anyhow!("Failed to rebind Windows SMTC: {:?}", e))?;
+        let tx = self.tx.clone();
         controls
-            .attach(handler)
+            .attach(move |event| {
+                let _ = tx.send(event);
+            })
             .map_err(|e| anyhow::anyhow!("Failed to attach rebound SMTC handler: {:?}", e))?;
         self.controls = controls;
-        Ok(())
-    }
 
-    pub fn attach<F>(&mut self, handler: F) -> Result<()>
-    where
-        F: Fn(MediaControlEvent) + Send + 'static,
-    {
-        self.controls
-            .attach(handler)
-            .map_err(|e| anyhow::anyhow!("Failed to attach SMTC handler: {:?}", e))?;
+        if let Some((title, artist, duration, cover_path)) = self.last_metadata.clone() {
+            self.set_metadata(&title, &artist, duration, cover_path.as_deref());
+        }
+        if let Some((playing, position)) = self.last_playback {
+            self.set_playback(playing, position);
+        }
+
         Ok(())
     }
 
@@ -120,8 +137,37 @@ impl SmtcManager {
         &mut self,
         title: &str,
         artist: &str,
-        duration: Option<std::time::Duration>,
+        duration: Option<Duration>,
+        cover_path: Option<&Path>,
     ) {
+        self.last_metadata = Some((
+            title.to_string(),
+            artist.to_string(),
+            duration,
+            cover_path.map(|p| p.to_path_buf()),
+        ));
+
+        let file_url = cover_path.and_then(|p| {
+            if p.exists() {
+                Some(format!("file://{}", p.to_string_lossy().replace('/', "\\")))
+            } else {
+                None
+            }
+        });
+
+        if let Some(ref url) = file_url {
+            let meta = MediaMetadata {
+                title: Some(title),
+                album: Some("YouTube Pure Audio"),
+                artist: Some(artist),
+                duration,
+                cover_url: Some(url),
+            };
+            if self.controls.set_metadata(meta).is_ok() {
+                return;
+            }
+        }
+
         let meta = MediaMetadata {
             title: Some(title),
             album: Some("YouTube Pure Audio"),
@@ -132,13 +178,23 @@ impl SmtcManager {
         let _ = self.controls.set_metadata(meta);
     }
 
-    pub fn set_playback(&mut self, playing: bool) {
+    pub fn set_playback(&mut self, playing: bool, position: Option<Duration>) {
+        self.last_playback = Some((playing, position));
         let playback = if playing {
-            MediaPlayback::Playing { progress: None }
+            MediaPlayback::Playing {
+                progress: position.map(MediaPosition),
+            }
         } else {
-            MediaPlayback::Paused { progress: None }
+            MediaPlayback::Paused {
+                progress: position.map(MediaPosition),
+            }
         };
         let _ = self.controls.set_playback(playback);
+    }
+
+    pub fn set_stopped(&mut self) {
+        self.last_playback = None;
+        let _ = self.controls.set_playback(MediaPlayback::Stopped);
     }
 }
 
