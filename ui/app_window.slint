@@ -11,6 +11,7 @@ import { TrackItemView } from "views/track_item.slint";
 
 export component AppWindow inherits Window {
     title: "YouTube Audio Player";
+    icon: @image-url("../yt_audio_icon.ico");
     no-frame: true;
     preferred-width: 580px;
     preferred-height: root.queue_expanded ? 460px : 185px;
@@ -121,6 +122,7 @@ export component AppWindow inherits Window {
                     y: (parent.height - self.height) / 2;
                     height: 20px;
                     horizontal-stretch: 0;
+                    min-width: 85px;
 
                     Image {
                         source: @image-url("icons/music-note.svg");
@@ -151,6 +153,7 @@ export component AppWindow inherits Window {
                     border-width: 1px;
                     border-color: search_input.has-focus ? Theme.accent_primary : Theme.border_subtle;
                     animate border-color { duration: 100ms; }
+                    clip: true;
 
                     TouchArea {
                         clicked => {
@@ -159,6 +162,8 @@ export component AppWindow inherits Window {
                     }
 
                     HorizontalLayout {
+                        width: 100%;
+                        height: 100%;
                         padding-left: 10px;
                         padding-right: 8px;
                         spacing: 8px;
@@ -174,11 +179,13 @@ export component AppWindow inherits Window {
 
                         Rectangle {
                             horizontal-stretch: 1;
+                            min-width: 0px;
                             clip: true;
 
                             search_input := TextInput {
                                 width: 100%;
                                 height: 100%;
+                                single-line: true;
                                 text <=> root.search_query;
                                 font-size: 11.5px;
                                 color: Theme.text_primary;
@@ -201,10 +208,12 @@ export component AppWindow inherits Window {
                             }
 
                             if root.search_query == "": Text {
+                                width: 100%;
                                 text: "Search song, playlist, or paste URL...";
                                 font-size: 11.5px;
                                 color: Theme.text_muted;
                                 vertical-alignment: center;
+                                overflow: elide;
                             }
                         }
 
@@ -231,6 +240,7 @@ export component AppWindow inherits Window {
                     y: (parent.height - self.height) / 2;
                     height: 28px;
                     horizontal-stretch: 0;
+                    min-width: 60px;
 
                     IconButton {
                         width: 28px;
