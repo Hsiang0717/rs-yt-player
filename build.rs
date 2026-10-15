@@ -3,6 +3,7 @@ fn main() {
 
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
         let mut res = winres::WindowsResource::new();
+        res.set_icon("yt_audio_icon.ico");
         res.set("FileDescription", "YouTube Pure Audio Player");
         res.set("ProductName", "YouTube Audio Player");
         res.set("OriginalFilename", "YouTubeAudioPlayer.exe");

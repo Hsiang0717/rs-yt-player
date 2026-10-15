@@ -17,8 +17,8 @@ impl SystemTray {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         }
 
-        // 1. Create a 32x32 colored RGBA icon in memory (indigo gradient circle)
-        let icon = create_tray_icon(32, 32)?;
+        // 1. Load application icon from embedded ICO bytes
+        let icon = load_tray_icon()?;
 
         // 2. Build tray menu
         let menu = Menu::new();
@@ -57,40 +57,13 @@ impl SystemTray {
     }
 }
 
-/// Create a 32x32 RGBA in-memory icon with a circular music icon badge
-fn create_tray_icon(width: u32, height: u32) -> Result<Icon> {
-    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-    let center_x = width as f32 / 2.0;
-    let center_y = height as f32 / 2.0;
-    let radius = (width as f32 / 2.0) - 2.0;
-
-    for y in 0..height {
-        for x in 0..width {
-            let dx = x as f32 - center_x;
-            let dy = y as f32 - center_y;
-            let dist = (dx * dx + dy * dy).sqrt();
-
-            if dist <= radius {
-                // Vibrant Indigo (#6366f1)
-                rgba.push(99); // R
-                rgba.push(102); // G
-                rgba.push(241); // B
-                rgba.push(255); // Alpha
-            } else if dist <= radius + 1.0 {
-                // Anti-aliased border
-                let alpha = ((radius + 1.0 - dist) * 255.0) as u8;
-                rgba.push(99);
-                rgba.push(102);
-                rgba.push(241);
-                rgba.push(alpha);
-            } else {
-                rgba.push(0);
-                rgba.push(0);
-                rgba.push(0);
-                rgba.push(0);
-            }
-        }
-    }
+/// Load and decode application icon for system tray (scaled to 32x32 RGBA)
+fn load_tray_icon() -> Result<Icon> {
+    let img = image::load_from_memory(include_bytes!("../yt_audio_icon.ico"))
+        .context("Failed to decode yt_audio_icon.ico")?;
+    let rgba_img = img.resize_exact(32, 32, image::imageops::FilterType::Lanczos3).into_rgba8();
+    let (width, height) = rgba_img.dimensions();
+    let rgba = rgba_img.into_raw();
 
     Icon::from_rgba(rgba, width, height).context("Failed to create Icon from RGBA bytes")
 }

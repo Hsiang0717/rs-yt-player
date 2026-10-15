@@ -25,7 +25,7 @@ i-slint-backend-winit = "1.9"
 raw-window-handle = "0.6"
 tray-icon = "0.19"
 muda = "0.15"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "ico"] }
 souvlaki = "0.7"
 windows = { version = "0.54", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_Com", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse", "Media_Control"] }
 
