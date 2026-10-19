@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::task::AbortHandle;
+use tracing::info;
 
 use crate::library::TrackRecord;
 use crate::ui_models::{
@@ -11,20 +13,30 @@ use crate::AppWindow;
 
 use super::PlaybackContext;
 
+#[derive(Default)]
+struct SearchCoordinator {
+    last_query: Option<String>,
+    last_requested_at: Option<Instant>,
+    active_abort: Option<AbortHandle>,
+    is_searching: bool,
+}
+
 pub fn bind_search_controls(
     app: &AppWindow,
     ctx: PlaybackContext,
     search_records: Arc<Mutex<Vec<TrackRecord>>>,
 ) {
     let search_generation = Arc::new(AtomicU64::new(0));
+    let coordinator = Arc::new(Mutex::new(SearchCoordinator::default()));
 
     // on_search_and_play
     let ctx_for_search = ctx.clone();
     let search_records_for_search = Arc::clone(&search_records);
     let search_generation_for_search = Arc::clone(&search_generation);
+    let coordinator_for_search = Arc::clone(&coordinator);
     app.on_search_and_play(move |query| {
-        let query_str = query.to_string();
-        if query_str.trim().is_empty() {
+        let query_str = query.trim().to_string();
+        if query_str.is_empty() {
             return;
         }
 
@@ -33,15 +45,52 @@ pub fn bind_search_controls(
             return;
         }
 
+        // Defense 1 & 2: Throttle & Duplicate Query Guard
+        {
+            let mut state = coordinator_for_search.lock().unwrap();
+            let now = Instant::now();
+
+            // Throttle: Ignore requests within 400ms
+            if let Some(last_time) = state.last_requested_at {
+                if now.duration_since(last_time) < Duration::from_millis(400) {
+                    info!("Search throttled: requested too rapidly");
+                    return;
+                }
+            }
+
+            // Duplicate query: Ignore if same query is currently searching or already populated
+            let has_existing_results = !search_records_for_search.lock().unwrap().is_empty();
+            if let Some(ref last_q) = state.last_query {
+                if last_q == &query_str && (state.is_searching || has_existing_results) {
+                    info!("Duplicate search ignored for query: {}", query_str);
+                    let ui_for_dup = ctx_for_search.ui_weak.clone();
+                    let _ = ui_for_dup.upgrade_in_event_loop(|ui| {
+                        apply_queue_expanded(&ui, true);
+                        ui.set_panel_tab(slint::SharedString::from("SEARCH"));
+                    });
+                    return;
+                }
+            }
+
+            state.last_query = Some(query_str.clone());
+            state.last_requested_at = Some(now);
+            state.is_searching = true;
+
+            // Defense 3: Cancel and kill previous search task / process
+            if let Some(prev_abort) = state.active_abort.take() {
+                prev_abort.abort();
+                info!("Aborted previous search task");
+            }
+        }
+
         let token = search_generation_for_search.fetch_add(1, Ordering::SeqCst) + 1;
         let ui_for_start = ctx_for_search.ui_weak.clone();
         let library_for_start = ctx_for_search.library.clone();
-        let query_title = query_str.clone();
+
+        // Defense 4: UI State Isolation.
+        // Keep active playing track title/status intact; update only the search panel.
         let _ = ui_for_start.upgrade_in_event_loop(move |ui| {
             apply_queue_expanded(&ui, true);
-            ui.set_track_title(slint::SharedString::from(format!("Searching: {}", query_title)));
-            ui.set_track_status(slint::SharedString::from("SEARCHING"));
-            ui.set_is_loading(true);
             ui.set_panel_tab(slint::SharedString::from("SEARCH"));
             ui.set_panel_message(slint::SharedString::from("Searching YouTube…"));
             ui.set_search_results(records_model(Vec::new(), &library_for_start, None));
@@ -49,12 +98,23 @@ pub fn bind_search_controls(
 
         let search_records = Arc::clone(&search_records_for_search);
         let search_gen = Arc::clone(&search_generation_for_search);
+        let coordinator_task = Arc::clone(&coordinator_for_search);
         let extractor = Arc::clone(&ctx_for_search.extractor);
         let library = ctx_for_search.library.clone();
         let ui_weak = ctx_for_search.ui_weak.clone();
 
-        tokio::spawn(async move {
+        let join_handle = tokio::spawn(async move {
             let search_result = extractor.search_tracks(&query_str).await;
+
+            // Update coordinator status
+            {
+                let mut state = coordinator_task.lock().unwrap();
+                if search_gen.load(Ordering::SeqCst) == token {
+                    state.is_searching = false;
+                    state.active_abort = None;
+                }
+            }
+
             match search_result {
                 Ok(results) => {
                     let records: Vec<TrackRecord> =
@@ -77,7 +137,6 @@ pub fn bind_search_controls(
                         let records_for_ui = records.clone();
                         let library_for_ui = library.clone();
                         let gen_for_ui = Arc::clone(&search_gen);
-                        let is_empty = records.is_empty();
                         let _ = ui_weak.upgrade_in_event_loop(move |ui| {
                             if gen_for_ui.load(Ordering::SeqCst) == token {
                                 let curr_key = ui.get_current_track_key();
@@ -87,12 +146,6 @@ pub fn bind_search_controls(
                                     Some(&curr_key),
                                 ));
                                 ui.set_panel_message(slint::SharedString::from(message));
-                                ui.set_is_loading(false);
-                                if is_empty {
-                                    ui.set_track_status(slint::SharedString::from("NO RESULTS"));
-                                } else if ui.get_track_status() == "SEARCHING" {
-                                    ui.set_track_status(slint::SharedString::from("READY"));
-                                }
                                 if !ui.get_queue_expanded() {
                                     apply_queue_expanded(&ui, true);
                                 }
@@ -129,8 +182,6 @@ pub fn bind_search_controls(
                     if search_gen.load(Ordering::SeqCst) == token {
                         let _ = ui_weak.upgrade_in_event_loop(move |ui| {
                             if search_gen.load(Ordering::SeqCst) == token {
-                                ui.set_is_loading(false);
-                                ui.set_track_status(slint::SharedString::from("ERROR"));
                                 ui.set_panel_message(slint::SharedString::from(message));
                             }
                         });
@@ -138,6 +189,9 @@ pub fn bind_search_controls(
                 }
             }
         });
+
+        // Store active abort handle
+        coordinator_for_search.lock().unwrap().active_abort = Some(join_handle.abort_handle());
     });
 
     // on_enqueue_search_result

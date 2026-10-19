@@ -116,6 +116,18 @@ pub(crate) fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
     cmd
 }
 
+pub(crate) fn async_silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 pub(crate) fn extract_stream_url_sync(
     yt_dlp_path: &std::path::Path,
     query: &str,
@@ -171,20 +183,16 @@ impl Extractor {
     /// Search YouTube and return selectable metadata without starting playback.
     pub async fn search_tracks(&self, query: &str) -> Result<Vec<SearchResult>> {
         let target = format!("ytsearch10:{}", query);
-        let yt_dlp_path = self.yt_dlp_path.clone();
-        let output = tokio::task::spawn_blocking(move || {
-            silent_command(&yt_dlp_path)
-                .args([
-                    "--no-warnings",
-                    "--flat-playlist",
-                    "--dump-single-json",
-                    &target,
-                ])
-                .output()
-        })
-        .await
-        .context("Failed to spawn YouTube search task")?
-        .context("Failed to execute YouTube search")?;
+        let output = async_silent_command(&self.yt_dlp_path)
+            .args([
+                "--no-warnings",
+                "--flat-playlist",
+                "--dump-single-json",
+                &target,
+            ])
+            .output()
+            .await
+            .context("Failed to execute YouTube search")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
