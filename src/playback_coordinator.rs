@@ -183,6 +183,7 @@ pub async fn play_with_metadata(
     // Autoplay prefetch: If queue is empty, prefetch YouTube related songs for seamless continuous playback
     if playback_succeeded {
         queue.prefetch_autoplay(Arc::clone(&extractor), current_id);
+        crate::win32_window::trim_process_working_set();
     }
 }
 
@@ -293,7 +294,12 @@ pub async fn play_track(
                     let temp_cover_path =
                         std::env::temp_dir().join(format!("rs_yt_cover_{}.png", meta.id));
                     if let Ok(dynamic_img) = image::load_from_memory(&bytes) {
-                        let _ = dynamic_img
+                        let resized = if dynamic_img.width() > 256 || dynamic_img.height() > 256 {
+                            dynamic_img.thumbnail(256, 256)
+                        } else {
+                            dynamic_img
+                        };
+                        let _ = resized
                             .save_with_format(&temp_cover_path, image::ImageFormat::Png);
                         let _ = library.store_cover(&meta.id, &bytes);
                         cover_path = if local_cache.exists() {

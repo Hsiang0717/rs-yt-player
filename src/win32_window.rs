@@ -57,9 +57,18 @@ pub unsafe extern "system" fn window_subclass_proc(
             set_taskbar_button(hwnd, false);
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
+        trim_process_working_set();
         return LRESULT(0);
     }
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// Trims the process working set, returning unused memory pages to Windows.
+pub fn trim_process_working_set() {
+    unsafe {
+        use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
 }
 
 pub fn set_taskbar_button(hwnd: HWND, visible: bool) {

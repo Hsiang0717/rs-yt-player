@@ -438,12 +438,19 @@ impl PlayQueue {
                     if let Ok(resp) = client.get(thumb_url).send().await
                         && let Ok(bytes) = resp.bytes().await
                             && let Ok(dynamic_img) = image::load_from_memory(&bytes)
-                                && dynamic_img
-                                    .save_with_format(&temp_path, image::ImageFormat::Png)
-                                    .is_ok()
-                                {
-                                    cover_path = Some(temp_path);
-                                }
+                    {
+                        let resized = if dynamic_img.width() > 256 || dynamic_img.height() > 256 {
+                            dynamic_img.thumbnail(256, 256)
+                        } else {
+                            dynamic_img
+                        };
+                        if resized
+                            .save_with_format(&temp_path, image::ImageFormat::Png)
+                            .is_ok()
+                        {
+                            cover_path = Some(temp_path);
+                        }
+                    }
                 }
 
                 // Check if queue front still matches this track

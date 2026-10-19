@@ -174,8 +174,42 @@ impl LibraryStore {
             std::fs::create_dir_all(parent)?;
         }
         let image = image::load_from_memory(bytes)?;
-        image.save_with_format(path, image::ImageFormat::Png)?;
+        let resized = if image.width() > 256 || image.height() > 256 {
+            image.thumbnail(256, 256)
+        } else {
+            image
+        };
+        resized.save_with_format(path, image::ImageFormat::Png)?;
         Ok(())
+    }
+
+    /// Compresses existing covers in cache if they exceed 256x256.
+    pub fn compact_cache(&self) {
+        let covers_dir = self
+            .path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("covers");
+        if !covers_dir.exists() {
+            return;
+        }
+        let entries = match std::fs::read_dir(&covers_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("png") {
+                if let Ok(bytes) = std::fs::read(&path) {
+                    if let Ok(img) = image::load_from_memory(&bytes) {
+                        if img.width() > 256 || img.height() > 256 {
+                            let resized = img.thumbnail(256, 256);
+                            let _ = resized.save_with_format(&path, image::ImageFormat::Png);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn save_locked(&self, data: &LibraryData) {

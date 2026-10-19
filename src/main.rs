@@ -98,6 +98,7 @@ async fn main() -> Result<()> {
     // Continuous Playback & Playlist Queue
     let play_queue = PlayQueue::new();
     let library = LibraryStore::load();
+    library.compact_cache();
     play_queue.set_repeat_mode(library.repeat_mode());
     play_queue.set_shuffle_enabled(library.shuffle_enabled());
     app.set_repeat_mode_label(slint::SharedString::from(library.repeat_mode().label()));
