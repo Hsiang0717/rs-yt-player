@@ -1,22 +1,29 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use tracing::{error, info};
+use std::time::Duration;
+use tracing::{error, info, warn};
 
-use crate::extractor::{AudioMetadata, Extractor};
-use crate::library::{LibraryStore, RepeatMode};
+use crate::AppWindow;
+use crate::extractor::{AudioMetadata, Extractor, shared_http_client};
+use crate::library::{LibraryStore, format_duration_secs};
 use crate::player::AudioPlayer;
 use crate::queue::PlayQueue;
 use crate::smtc::SmtcManager;
-use crate::ui_callbacks::PendingSeekState;
 use crate::ui_models::{
-    apply_queue_expanded, query_video_id, queue_items_model, record_from_audio, records_model,
-    requested_video_id,
+    apply_queue_expanded, load_cached_cover_image, query_video_id, queue_items_model,
+    record_from_audio, records_model, requested_video_id,
 };
-use crate::AppWindow;
+
+pub mod transport;
+pub use transport::{
+    trigger_next, trigger_previous, trigger_seek_to_ratio, trigger_seek_to_secs,
+    trigger_toggle_play_pause,
+};
 
 pub type SmtcHandle = Option<Arc<Mutex<SmtcManager>>>;
 pub type LoadingAbortHandle = Arc<Mutex<Option<tokio::task::AbortHandle>>>;
+
+static CONSECUTIVE_FAILURES: AtomicUsize = AtomicUsize::new(0);
 
 /// Play track directly from pre-extracted metadata and cover image
 pub async fn play_with_metadata(
@@ -51,21 +58,20 @@ pub async fn play_with_metadata(
     } else {
         meta.start_offset_secs
     };
-    let m = (duration_secs as u64) / 60;
-    let s = (duration_secs as u64) % 60;
-    let duration_str = format!("{:02}:{:02}", m, s);
+    let duration_str = format_duration_secs(duration_secs as f64);
     let badge = meta
         .audio_codec
         .unwrap_or_else(|| "AAC".to_string())
         .to_uppercase();
     let current_id = meta.id.clone();
     let request_headers = meta.http_headers.clone();
+    let loudness_db = meta.loudness_db;
 
-    // Start streaming the selected AAC format through Symphonia.
     let stream_url = meta.stream_url.clone();
     let query_for_player = query_str.clone();
     let play_res = tokio::task::spawn_blocking(move || {
         player.set_current_query(Some(query_for_player));
+        player.set_loudness_db(loudness_db);
         player.play_stream_from_with_headers(
             &stream_url,
             request_headers,
@@ -82,28 +88,31 @@ pub async fn play_with_metadata(
     };
     let playback_succeeded = playback_error.is_none();
     if playback_succeeded {
+        CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
         queue.record_current(query_str.clone());
         library.record_played(record.clone());
+        library.update_playback_position(start_offset_secs);
+        library.save_queue(queue.to_track_records());
     }
 
-    // Update Windows SMTC if available
     if let Some(smtc_arc) = &smtc
-        && let Ok(mut lock) = smtc_arc.lock() {
-            lock.set_metadata(
-                &title,
-                &uploader,
-                if duration_secs > 0.0 {
-                    Some(Duration::from_secs_f32(duration_secs))
-                } else {
-                    None
-                },
-                cover_path.as_deref(),
-            );
-            lock.set_playback(
-                playback_succeeded,
-                Some(Duration::from_secs_f32(start_offset_secs)),
-            );
-        }
+        && let Ok(mut lock) = smtc_arc.lock()
+    {
+        lock.set_metadata(
+            &title,
+            &uploader,
+            if duration_secs > 0.0 {
+                Some(Duration::from_secs_f32(duration_secs))
+            } else {
+                None
+            },
+            cover_path.as_deref(),
+        );
+        lock.set_playback(
+            playback_succeeded,
+            Some(Duration::from_secs_f32(start_offset_secs)),
+        );
+    }
 
     let queue_for_ui = queue.clone();
     let library_for_ui = library.clone();
@@ -127,22 +136,19 @@ pub async fn play_with_metadata(
                     0.0
                 });
                 ui.set_buffer_ratio(0.0);
-                let position_m = (start_offset_secs as u64) / 60;
-                let position_s = (start_offset_secs as u64) % 60;
-                ui.set_time_current(slint::SharedString::from(format!("{:02}:{:02}", position_m, position_s)));
+                let pos_str = format_duration_secs(start_offset_secs as f64);
+                ui.set_time_current(slint::SharedString::from(pos_str.clone()));
                 ui.set_time_total(slint::SharedString::from(duration_str.clone()));
                 ui.set_time_display(slint::SharedString::from(format!(
-                    "{:02}:{:02} / {}",
-                    position_m, position_s, duration_str
+                    "{} / {}",
+                    pos_str, duration_str
                 )));
 
-                if let Some(path) = cover_path {
-                    if let Ok(img) = slint::Image::load_from_path(&path) {
-                        ui.set_cover_image(img);
-                        ui.set_has_cover(true);
-                    } else {
-                        ui.set_has_cover(false);
-                    }
+                if let Some(img) = load_cached_cover_image(&library_for_ui, &record.id)
+                    .or_else(|| cover_path.and_then(|p| slint::Image::load_from_path(&p).ok()))
+                {
+                    ui.set_cover_image(img);
+                    ui.set_has_cover(true);
                 } else {
                     ui.set_has_cover(false);
                 }
@@ -180,14 +186,13 @@ pub async fn play_with_metadata(
         }
     });
 
-    // Autoplay prefetch: If queue is empty, prefetch YouTube related songs for seamless continuous playback
     if playback_succeeded {
-        queue.prefetch_autoplay(Arc::clone(&extractor), current_id);
+        queue.prefetch_autoplay(Arc::clone(&extractor), library, current_id);
         crate::win32_window::trim_process_working_set();
     }
 }
 
-/// Core async track player supporting single songs, playlists, and autoplay queues
+/// Core async track player supporting single songs, playlists, and dead-track auto-skip
 pub async fn play_track(
     query_str: String,
     extractor: Arc<Extractor>,
@@ -198,214 +203,100 @@ pub async fn play_track(
     library: LibraryStore,
     last_query: Arc<Mutex<Option<String>>>,
 ) {
-    *last_query.lock().unwrap() = Some(query_str.clone());
-    let query_vid = query_video_id(&query_str);
-    let cached_cover = library.cover_path(&query_vid);
-    let cover_path_opt = if cached_cover.exists() {
-        Some(cached_cover)
-    } else {
-        None
-    };
-    let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-        ui.set_is_loading(true);
-        ui.set_can_retry(false);
-        ui.set_track_status(slint::SharedString::from("LOADING..."));
-        if let Some(path) = cover_path_opt {
-            if let Ok(img) = slint::Image::load_from_path(&path) {
+    let mut active_query = query_str;
+
+    loop {
+        *last_query.lock().unwrap() = Some(active_query.clone());
+        let query_vid = query_video_id(&active_query);
+        let library_for_load = library.clone();
+        let vid_for_load = query_vid.clone();
+        let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+            ui.set_is_loading(true);
+            ui.set_can_retry(false);
+            ui.set_track_status(slint::SharedString::from("LOADING..."));
+            if let Some(img) = load_cached_cover_image(&library_for_load, &vid_for_load) {
                 ui.set_cover_image(img);
                 ui.set_has_cover(true);
             } else {
                 ui.set_has_cover(false);
             }
-        } else {
-            ui.set_has_cover(false);
-        }
-    });
+        });
 
-    // Check if query is a playlist URL
-    let is_playlist_url = query_str.contains("list=");
-    let requested_offset_secs = Extractor::start_offset_secs(&query_str).unwrap_or(0.0);
-    let mut target_query = query_str.clone();
-    let mut queue_expanded = false;
+        let is_playlist_url = active_query.contains("list=");
+        let requested_offset_secs = Extractor::start_offset_secs(&active_query).unwrap_or(0.0);
+        let mut target_query = active_query.clone();
+        let mut queue_expanded = false;
 
-    if is_playlist_url {
-        info!("Detected YouTube playlist URL: {}", query_str);
-        let mut items = match extractor.extract_playlist_items(&query_str).await {
-            Ok(items) if !items.is_empty() => items,
-            Ok(_) => {
-                let _ = ui_weak.upgrade_in_event_loop(|ui| {
-                    ui.set_is_loading(false);
-                    ui.set_can_retry(true);
-                    ui.set_track_status(slint::SharedString::from("ERROR"));
-                    ui.set_track_artist(slint::SharedString::from(
-                        "The playlist has no playable tracks",
-                    ));
-                });
-                return;
-            }
-            Err(error) => {
-                let message = error.to_string();
-                let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                    ui.set_is_loading(false);
-                    ui.set_can_retry(true);
-                    ui.set_track_status(slint::SharedString::from("ERROR"));
-                    ui.set_track_artist(slint::SharedString::from(message));
-                });
-                return;
-            }
-        };
-        info!("Extracted {} items", items.len());
-        if let Some(video_id) = requested_video_id(&query_str)
-            && let Some(selected_index) = items.iter().position(|item| item.id == video_id) {
+        if is_playlist_url {
+            info!("Detected YouTube playlist URL: {}", active_query);
+            let mut items = match extractor.extract_playlist_items(&active_query).await {
+                Ok(items) if !items.is_empty() => items,
+                Ok(_) => {
+                    let _ = ui_weak.upgrade_in_event_loop(|ui| {
+                        ui.set_is_loading(false);
+                        ui.set_can_retry(true);
+                        ui.set_track_status(slint::SharedString::from("ERROR"));
+                        ui.set_track_artist(slint::SharedString::from(
+                            "The playlist has no playable tracks",
+                        ));
+                    });
+                    return;
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                        ui.set_is_loading(false);
+                        ui.set_can_retry(true);
+                        ui.set_track_status(slint::SharedString::from("ERROR"));
+                        ui.set_track_artist(slint::SharedString::from(message));
+                    });
+                    return;
+                }
+            };
+            info!("Extracted {} items", items.len());
+            if let Some(video_id) = requested_video_id(&active_query)
+                && let Some(selected_index) = items.iter().position(|item| item.id == video_id)
+            {
                 items.rotate_left(selected_index);
             }
-        if let Some(first) = queue.load_playlist(items) {
-            target_query = first;
-        }
-        queue_expanded = true;
-    }
-
-    let queue_for_ui = queue.clone();
-    let library_for_ui = library.clone();
-    let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-        ui.set_queue_items(queue_items_model(&queue_for_ui, &library_for_ui));
-        if queue_expanded {
-            apply_queue_expanded(&ui, true);
-        }
-    });
-
-    info!("Resolving stream metadata for query: {}", target_query);
-    let extracted = extractor.extract_audio(&target_query).await;
-
-    match extracted {
-        Ok(mut meta) => {
-            if meta.start_offset_secs == 0.0 && requested_offset_secs > 0.0 {
-                meta.start_offset_secs = requested_offset_secs;
+            if let Some(first) = queue.load_playlist(items) {
+                target_query = first;
             }
-            let mut cover_path = None;
-            let local_cache = library.cover_path(&meta.id);
-            if local_cache.exists() {
-                cover_path = Some(local_cache);
-            } else if let Some(thumb_url) = &meta.thumbnail {
-                let client = reqwest::Client::new();
-                if let Ok(resp) = client.get(thumb_url).send().await
-                    && let Ok(bytes) = resp.bytes().await
-                {
-                    let temp_cover_path =
-                        std::env::temp_dir().join(format!("rs_yt_cover_{}.png", meta.id));
-                    if let Ok(dynamic_img) = image::load_from_memory(&bytes) {
-                        let resized = if dynamic_img.width() > 256 || dynamic_img.height() > 256 {
-                            dynamic_img.thumbnail(256, 256)
-                        } else {
-                            dynamic_img
-                        };
-                        let _ = resized
-                            .save_with_format(&temp_cover_path, image::ImageFormat::Png);
-                        let _ = library.store_cover(&meta.id, &bytes);
-                        cover_path = if local_cache.exists() {
-                            Some(local_cache)
-                        } else {
-                            Some(temp_cover_path)
-                        };
-                    }
-                }
-            }
-            play_with_metadata(
-                target_query,
-                meta,
-                cover_path,
-                extractor,
-                player,
-                smtc,
-                ui_weak,
-                queue,
-                library,
-                last_query,
-            )
-            .await;
-        }
-        Err(err) => {
-            error!("Extraction error: {:#}", err);
-            let error_message = err.to_string();
-            let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                ui.set_is_loading(false);
-                ui.set_can_retry(true);
-                ui.set_track_status(slint::SharedString::from("ERROR"));
-                ui.set_track_artist(slint::SharedString::from(error_message));
-            });
-        }
-    }
-}
-
-pub fn trigger_next(
-    extractor: Arc<Extractor>,
-    player: Arc<AudioPlayer>,
-    smtc: SmtcHandle,
-    ui_weak: slint::Weak<AppWindow>,
-    queue: PlayQueue,
-    library: LibraryStore,
-    is_advancing: Arc<Mutex<bool>>,
-    natural_end: bool,
-    last_query: Arc<Mutex<Option<String>>>,
-    loading_abort: LoadingAbortHandle,
-) {
-    let mut advancing = match is_advancing.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if *advancing {
-        return;
-    }
-    *advancing = true;
-
-    if natural_end && queue.repeat_mode() == RepeatMode::One
-        && let Some(current) = queue.current_query() {
-            let adv_lock = Arc::clone(&is_advancing);
-            let abort_handle = loading_abort.clone();
-            let join_handle = tokio::spawn(async move {
-                play_track(
-                    current, extractor, player, smtc, ui_weak, queue, library, last_query,
-                )
-                .await;
-                if let Ok(mut guard) = adv_lock.lock() {
-                    *guard = false;
-                }
-            });
-            if let Ok(mut guard) = abort_handle.lock()
-                && let Some(prev) = guard.replace(join_handle.abort_handle()) {
-                    prev.abort();
-                }
-            return;
+            library.save_queue(queue.to_track_records());
+            queue_expanded = true;
         }
 
-    if let Some((next_query, maybe_preloaded)) = queue.pop_next() {
-        info!("Advancing to next track in queue: {}", next_query);
-        let q_ui = queue.clone();
-        let l_ui = library.clone();
+        let queue_for_ui = queue.clone();
+        let library_for_ui = library.clone();
         let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-            ui.set_queue_items(queue_items_model(&q_ui, &l_ui));
+            ui.set_queue_items(queue_items_model(&queue_for_ui, &library_for_ui));
+            if queue_expanded {
+                apply_queue_expanded(&ui, true);
+            }
         });
-        let adv_lock = Arc::clone(&is_advancing);
-        let abort_handle = loading_abort.clone();
-        let join_handle = tokio::spawn(async move {
-            if let Some(preloaded) = maybe_preloaded {
-                info!(
-                    "Seamless transition using preloaded track: {}",
-                    preloaded.meta.title
-                );
-                let cache_path = library.cover_path(&preloaded.meta.id);
-                if !cache_path.exists()
-                    && let Some(path) = &preloaded.cover_path
-                        && let Ok(bytes) = std::fs::read(path) {
-                            let _ = library.store_cover(&preloaded.meta.id, &bytes);
-                        }
-                let cover_path = cache_path
-                    .exists()
-                    .then_some(cache_path)
-                    .or(preloaded.cover_path);
+
+        info!("Resolving stream metadata for query: {}", target_query);
+        let extracted = extractor.extract_audio(&target_query).await;
+
+        match extracted {
+            Ok(mut meta) => {
+                if meta.start_offset_secs == 0.0 && requested_offset_secs > 0.0 {
+                    meta.start_offset_secs = requested_offset_secs;
+                }
+                let mut cover_path = None;
+                let local_cache = library.cover_path(&meta.id);
+                if local_cache.exists() {
+                    cover_path = Some(local_cache);
+                } else if let Some(thumb_url) = &meta.thumbnail
+                    && let Ok(resp) = shared_http_client().get(thumb_url).send().await
+                    && let Ok(bytes) = resp.bytes().await
+                    && let Ok(saved_path) = library.store_cover(&meta.id, &bytes)
+                {
+                    cover_path = Some(saved_path);
+                }
                 play_with_metadata(
-                    preloaded.query,
-                    preloaded.meta,
+                    target_query,
+                    meta,
                     cover_path,
                     extractor,
                     player,
@@ -416,78 +307,43 @@ pub fn trigger_next(
                     last_query,
                 )
                 .await;
-            } else {
-                play_track(
-                    next_query, extractor, player, smtc, ui_weak, queue, library, last_query,
-                )
-                .await;
+                return;
             }
-            if let Ok(mut guard) = adv_lock.lock() {
-                *guard = false;
-            }
-        });
-        if let Ok(mut guard) = abort_handle.lock()
-            && let Some(prev) = guard.replace(join_handle.abort_handle()) {
-                prev.abort();
-            }
-    } else {
-        *advancing = false;
-        info!("Next track requested, but queue is empty.");
-    }
-}
+            Err(err) => {
+                error!("Extraction error: {:#}", err);
+                let failures = CONSECUTIVE_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+                // Dead-Track Auto-Skip: if queue has remaining tracks and we haven't failed 3 times in a row, skip!
+                if failures <= 3
+                    && let Some((next_in_queue, _)) = queue.pop_next()
+                {
+                    warn!(
+                        "Dead-track auto-skip (#{}): skipping unavailable track and advancing to {}",
+                        failures, next_in_queue
+                    );
+                    library.save_queue(queue.to_track_records());
+                    let q_ui = queue.clone();
+                    let l_ui = library.clone();
+                    let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                        ui.set_queue_items(queue_items_model(&q_ui, &l_ui));
+                        ui.set_panel_message(slint::SharedString::from(
+                            "Skipped unavailable track; advancing to next...",
+                        ));
+                    });
+                    tokio::time::sleep(Duration::from_millis(750)).await;
+                    active_query = next_in_queue;
+                    continue;
+                }
 
-pub fn trigger_previous(
-    extractor: Arc<Extractor>,
-    player: Arc<AudioPlayer>,
-    smtc: SmtcHandle,
-    ui_weak: slint::Weak<AppWindow>,
-    queue: PlayQueue,
-    library: LibraryStore,
-    is_advancing: Arc<Mutex<bool>>,
-    last_query: Arc<Mutex<Option<String>>>,
-    loading_abort: LoadingAbortHandle,
-) {
-    let mut advancing = match is_advancing.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if *advancing {
-        return;
-    }
-    *advancing = true;
-    if let Some(prev_query) = queue.pop_previous() {
-        info!("Switching to previous track in history: {}", prev_query);
-        let q_ui = queue.clone();
-        let l_ui = library.clone();
-        let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-            ui.set_queue_items(queue_items_model(&q_ui, &l_ui));
-        });
-        let adv_lock = Arc::clone(&is_advancing);
-        let abort_handle = loading_abort.clone();
-        let join_handle = tokio::spawn(async move {
-            play_track(
-                prev_query, extractor, player, smtc, ui_weak, queue, library, last_query,
-            )
-            .await;
-            if let Ok(mut guard) = adv_lock.lock() {
-                *guard = false;
+                CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
+                let error_message = err.to_string();
+                let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                    ui.set_is_loading(false);
+                    ui.set_can_retry(true);
+                    ui.set_track_status(slint::SharedString::from("ERROR"));
+                    ui.set_track_artist(slint::SharedString::from(error_message));
+                });
+                return;
             }
-        });
-        if let Ok(mut guard) = abort_handle.lock()
-            && let Some(prev) = guard.replace(join_handle.abort_handle()) {
-                prev.abort();
-            }
-    } else {
-        *advancing = false;
-        info!("No previous track in history; seeking to beginning.");
-        let _ = player.seek_to(0.0);
-        if let Some(smtc_arc) = &smtc
-            && let Ok(mut lock) = smtc_arc.lock() {
-                lock.set_playback(true, Some(Duration::ZERO));
-            }
-        if let Some(ui) = ui_weak.upgrade() {
-            ui.set_progress_ratio(0.0);
-            ui.set_panel_message(slint::SharedString::from("已回到當前歌曲開頭（無上一曲紀錄）"));
         }
     }
 }
@@ -515,235 +371,8 @@ pub fn start_track_playback(
         .await;
     });
     if let Ok(mut guard) = loading_abort.lock()
-        && let Some(prev) = guard.replace(join_handle.abort_handle()) {
-            prev.abort();
-        }
-}
-
-pub fn trigger_toggle_play_pause(
-    player: Arc<AudioPlayer>,
-    extractor: Arc<Extractor>,
-    smtc: SmtcHandle,
-    ui_weak: slint::Weak<AppWindow>,
-    last_query: Arc<Mutex<Option<String>>>,
-) {
-    if !player.has_track() {
-        return;
+        && let Some(prev) = guard.replace(join_handle.abort_handle())
+    {
+        prev.abort();
     }
-
-    let is_paused = player.is_paused();
-    if !is_paused && player.is_active() {
-        // Pausing is instantaneous and synchronous
-        let cur_pos = player.current_position();
-        player.pause();
-        if let Some(smtc_arc) = &smtc
-            && let Ok(mut lock) = smtc_arc.lock() {
-                lock.set_playback(false, Some(Duration::from_secs_f32(cur_pos)));
-            }
-        let _ = ui_weak.upgrade_in_event_loop(|ui| {
-            ui.set_is_playing(false);
-            ui.set_track_status(slint::SharedString::from("PAUSED"));
-        });
-    } else {
-        // Resuming: check if direct unpause is safe or if background refresh is required
-        let needs_refresh = player.is_stream_expired_or_stale() || crate::win32_window::take_system_resumed();
-        if !needs_refresh {
-            let cur_pos = player.current_position();
-            player.resume_direct();
-            if let Some(smtc_arc) = &smtc
-                && let Ok(mut lock) = smtc_arc.lock() {
-                    lock.set_playback(true, Some(Duration::from_secs_f32(cur_pos)));
-                }
-            let _ = ui_weak.upgrade_in_event_loop(|ui| {
-                ui.set_is_playing(true);
-                ui.set_track_status(slint::SharedString::from("PLAYING"));
-            });
-        } else {
-            // Asynchronously refresh the stream in background without blocking the Slint UI thread
-            let _ = ui_weak.upgrade_in_event_loop(|ui| {
-                ui.set_is_loading(true);
-                ui.set_is_playing(true);
-                ui.set_track_status(slint::SharedString::from("RESUMING..."));
-            });
-            let player_clone = Arc::clone(&player);
-            let extractor_clone = Arc::clone(&extractor);
-            let smtc_clone = smtc.clone();
-            let ui_weak_clone = ui_weak.clone();
-            let last_query_clone = Arc::clone(&last_query);
-
-            tokio::spawn(async move {
-                let current_pos = player_clone.current_position();
-                let total_dur = player_clone.total_duration();
-                let query_opt = player_clone
-                    .current_query()
-                    .or_else(|| last_query_clone.lock().ok().and_then(|g| g.clone()));
-
-                let refresh_result = if let Some(query) = query_opt {
-                    info!("Refreshing stream URL in background on resume for: {}", query);
-                    let yt_dlp = extractor_clone.yt_dlp_path().to_path_buf();
-                    let mut extract_res = Err(anyhow::anyhow!("Initial"));
-                    for attempt in 0..2 {
-                        let query_clone = query.clone();
-                        let yt_dlp_clone = yt_dlp.clone();
-                        extract_res = tokio::task::spawn_blocking(move || {
-                            crate::extractor::extract_stream_url_sync(&yt_dlp_clone, &query_clone)
-                        })
-                        .await
-                        .unwrap_or_else(|e| Err(anyhow::anyhow!("Task failed: {}", e)));
-
-                        if extract_res.is_ok() {
-                            break;
-                        }
-                        if attempt == 0 {
-                            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                        }
-                    }
-
-                    match extract_res {
-                        Ok((new_url, new_headers)) => {
-                            let p = Arc::clone(&player_clone);
-                            tokio::task::spawn_blocking(move || {
-                                let _ = p.recreate_sink();
-                                p.seek_stream_to(&new_url, new_headers, None, current_pos, total_dur)
-                            })
-                            .await
-                            .unwrap_or_else(|e| Err(anyhow::anyhow!("Seek task failed: {}", e)))
-                        }
-                        Err(e) => Err(e),
-                    }
-                } else {
-                    Err(anyhow::anyhow!("No active query to refresh"))
-                };
-
-                match refresh_result {
-                    Ok(()) => {
-                        info!("Stream resumed successfully at {:.1}s.", current_pos);
-                        if let Some(smtc_arc) = &smtc_clone
-                            && let Ok(mut lock) = smtc_arc.lock() {
-                                lock.set_playback(true, Some(Duration::from_secs_f32(current_pos)));
-                            }
-                        let _ = ui_weak_clone.upgrade_in_event_loop(|ui| {
-                            ui.set_is_loading(false);
-                            ui.set_is_playing(true);
-                            ui.set_track_status(slint::SharedString::from("PLAYING"));
-                        });
-                    }
-                    Err(err) => {
-                        error!("Failed to refresh stream on resume: {:#}", err);
-                        let _ = ui_weak_clone.upgrade_in_event_loop(|ui| {
-                            ui.set_is_loading(false);
-                            ui.set_is_playing(false);
-                            ui.set_can_retry(true);
-                            ui.set_track_status(slint::SharedString::from("ERROR"));
-                            ui.set_track_artist(slint::SharedString::from(
-                                "Network reconnect failed. Click play to retry.",
-                            ));
-                        });
-                    }
-                }
-            });
-        }
-    }
-}
-
-pub fn trigger_seek_to_ratio(
-    ratio: f32,
-    player: Arc<AudioPlayer>,
-    smtc: SmtcHandle,
-    ui_weak: slint::Weak<AppWindow>,
-    pending_seek: Arc<Mutex<Option<PendingSeekState>>>,
-    seek_seq: Arc<AtomicU64>,
-    seek_lock: Arc<tokio::sync::Mutex<()>>,
-) {
-    let ratio = ratio.clamp(0.0, 1.0);
-    let current_seq = seek_seq.fetch_add(1, Ordering::SeqCst) + 1;
-    let total_dur = player.total_duration();
-    let target_secs = ratio * total_dur;
-    info!(
-        "Executing seek #{} to {:.1}s ({:.1}%)",
-        current_seq,
-        target_secs,
-        ratio * 100.0
-    );
-
-    if let Some(ui) = ui_weak.upgrade() {
-        ui.set_progress_ratio(ratio);
-        let cur_m = (target_secs as u64) / 60;
-        let cur_s = (target_secs as u64) % 60;
-        let tot_m = (total_dur as u64) / 60;
-        let tot_s = (total_dur as u64) % 60;
-        ui.set_time_current(slint::SharedString::from(format!("{:02}:{:02}", cur_m, cur_s)));
-        ui.set_time_total(slint::SharedString::from(format!("{:02}:{:02}", tot_m, tot_s)));
-        ui.set_time_display(slint::SharedString::from(format!(
-            "{:02}:{:02} / {:02}:{:02}",
-            cur_m, cur_s, tot_m, tot_s
-        )));
-        ui.set_track_status(slint::SharedString::from("BUFFERING"));
-    }
-
-    *pending_seek.lock().unwrap() = Some(PendingSeekState {
-        id: current_seq,
-        target_ratio: ratio,
-        target_secs,
-        requested_at: Instant::now(),
-    });
-
-    let player_clone = Arc::clone(&player);
-    let ui_weak_clone = ui_weak.clone();
-    let smtc_clone = smtc.clone();
-    let pending_seek_clone = Arc::clone(&pending_seek);
-    let seek_seq_clone = Arc::clone(&seek_seq);
-    let seek_lock_clone = Arc::clone(&seek_lock);
-
-    tokio::spawn(async move {
-        let _guard = seek_lock_clone.lock().await;
-        if seek_seq_clone.load(Ordering::SeqCst) != current_seq {
-            return;
-        }
-
-        let result = tokio::task::spawn_blocking(move || player_clone.seek_to(target_secs)).await;
-        if seek_seq_clone.load(Ordering::SeqCst) == current_seq {
-            if matches!(result, Ok(Ok(()))) {
-                if let Some(ui) = ui_weak_clone.upgrade() {
-                    ui.set_is_playing(true);
-                    ui.set_track_status(slint::SharedString::from("PLAYING"));
-                }
-                if let Some(smtc_arc) = &smtc_clone
-                    && let Ok(mut lock) = smtc_arc.lock() {
-                        lock.set_playback(true, Some(Duration::from_secs_f32(target_secs)));
-                    }
-            }
-            let mut lock = pending_seek_clone.lock().unwrap();
-            if let Some(p) = lock.as_ref()
-                && p.id == current_seq {
-                    *lock = None;
-                }
-        }
-    });
-}
-
-pub fn trigger_seek_to_secs(
-    target_secs: f32,
-    player: Arc<AudioPlayer>,
-    smtc: SmtcHandle,
-    ui_weak: slint::Weak<AppWindow>,
-    pending_seek: Arc<Mutex<Option<PendingSeekState>>>,
-    seek_seq: Arc<AtomicU64>,
-    seek_lock: Arc<tokio::sync::Mutex<()>>,
-) {
-    let total_dur = player.total_duration();
-    if total_dur <= 0.0 {
-        return;
-    }
-    let target_secs = target_secs.clamp(0.0, total_dur);
-    let ratio = target_secs / total_dur;
-    trigger_seek_to_ratio(
-        ratio,
-        player,
-        smtc,
-        ui_weak,
-        pending_seek,
-        seek_seq,
-        seek_lock,
-    );
 }

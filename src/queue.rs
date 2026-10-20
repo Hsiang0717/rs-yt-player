@@ -1,5 +1,5 @@
-use crate::extractor::{AudioMetadata, Extractor, PlaylistItem};
-use crate::library::RepeatMode;
+use crate::extractor::{AudioMetadata, Extractor, PlaylistItem, shared_http_client};
+use crate::library::{LibraryStore, RepeatMode, TrackRecord};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,6 +62,7 @@ pub struct PlayQueue {
     titles: Arc<Mutex<HashMap<String, QueueItem>>>,
     repeat_mode: Arc<Mutex<RepeatMode>>,
     shuffle_enabled: Arc<Mutex<bool>>,
+    autoplay_enabled: Arc<Mutex<bool>>,
     repeat_cycle: Arc<Mutex<Vec<String>>>,
 }
 
@@ -76,6 +77,7 @@ impl PlayQueue {
             titles: Arc::new(Mutex::new(HashMap::new())),
             repeat_mode: Arc::new(Mutex::new(RepeatMode::Off)),
             shuffle_enabled: Arc::new(Mutex::new(false)),
+            autoplay_enabled: Arc::new(Mutex::new(true)),
             repeat_cycle: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -85,12 +87,34 @@ impl PlayQueue {
         {
             let mut cycle = self.repeat_cycle.lock().unwrap();
             if cycle.is_empty()
-                && let Some(current) = current {
-                    cycle.push(current);
-                }
+                && let Some(current) = current
+            {
+                cycle.push(current);
+            }
             cycle.push(item.clone());
         }
         self.inner.lock().unwrap().push_back(item);
+    }
+
+    /// Insert a track at the very front of the upcoming queue ("Play Next").
+    pub fn push_front(&self, item: String) {
+        let current = self.current.lock().unwrap().clone();
+        {
+            let mut cycle = self.repeat_cycle.lock().unwrap();
+            if cycle.is_empty() {
+                if let Some(current) = current {
+                    cycle.push(current);
+                }
+                cycle.push(item.clone());
+            } else {
+                let insert_pos = 1.min(cycle.len());
+                cycle.insert(insert_pos, item.clone());
+            }
+        }
+        self.inner.lock().unwrap().push_front(item);
+        if let Ok(mut pre_lock) = self.preloaded.lock() {
+            *pre_lock = None;
+        }
     }
 
     /// Start a new repeat-all cycle at a directly selected track, followed by
@@ -107,9 +131,10 @@ impl PlayQueue {
         let item = q.pop_front();
         if let Ok(mut pre_lock) = self.preloaded.lock()
             && let Some(pre) = pre_lock.as_ref()
-                && item.as_ref() == Some(&pre.query) {
-                    *pre_lock = None;
-                }
+            && item.as_ref() == Some(&pre.query)
+        {
+            *pre_lock = None;
+        }
         item
     }
 
@@ -121,12 +146,13 @@ impl PlayQueue {
     pub fn record_current(&self, query: String) {
         let mut curr_lock = self.current.lock().unwrap();
         if let Some(old) = curr_lock.take()
-            && old != query {
-                let mut hist = self.history.lock().unwrap();
-                if hist.last() != Some(&old) {
-                    hist.push(old);
-                }
+            && old != query
+        {
+            let mut hist = self.history.lock().unwrap();
+            if hist.last() != Some(&old) {
+                hist.push(old);
             }
+        }
         {
             let mut cycle = self.repeat_cycle.lock().unwrap();
             if !cycle.contains(&query) {
@@ -171,6 +197,43 @@ impl PlayQueue {
             .collect()
     }
 
+    pub fn to_track_records(&self) -> Vec<TrackRecord> {
+        self.upcoming_items()
+            .into_iter()
+            .map(|item| {
+                let id = crate::ui_models::query_video_id(&item.query);
+                TrackRecord {
+                    id,
+                    title: item.title,
+                    artist: item.artist,
+                    duration_secs: item.duration_secs,
+                    thumbnail_url: item.thumbnail_url,
+                }
+            })
+            .collect()
+    }
+
+    pub fn restore_saved_queue(&self, records: Vec<TrackRecord>) {
+        let mut titles = self.titles.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
+        let mut cycle = self.repeat_cycle.lock().unwrap();
+        for record in records {
+            let query = record.video_url();
+            titles.insert(
+                query.clone(),
+                QueueItem {
+                    query: query.clone(),
+                    title: record.title,
+                    artist: record.artist,
+                    duration_secs: record.duration_secs,
+                    thumbnail_url: record.thumbnail_url,
+                },
+            );
+            inner.push_back(query.clone());
+            cycle.push(query);
+        }
+    }
+
     pub fn current_query(&self) -> Option<String> {
         self.current.lock().unwrap().clone()
     }
@@ -198,9 +261,10 @@ impl PlayQueue {
             if cycle.is_empty() {
                 cycle = self.history.lock().unwrap().clone();
                 if let Some(current) = self.current.lock().unwrap().clone()
-                    && cycle.last() != Some(&current) {
-                        cycle.push(current);
-                    }
+                    && cycle.last() != Some(&current)
+                {
+                    cycle.push(current);
+                }
                 *self.repeat_cycle.lock().unwrap() = cycle.clone();
             }
             if !cycle.is_empty() {
@@ -221,9 +285,10 @@ impl PlayQueue {
         let query = q.remove(index)?;
         let mut pre_lock = self.preloaded.lock().unwrap();
         if let Some(pre) = pre_lock.take()
-            && pre.query == query {
-                return Some((query, Some(pre)));
-            }
+            && pre.query == query
+        {
+            return Some((query, Some(pre)));
+        }
         Some((query, None))
     }
 
@@ -232,9 +297,10 @@ impl PlayQueue {
         let query = q.remove(index)?;
         let mut pre_lock = self.preloaded.lock().unwrap();
         if let Some(pre) = pre_lock.take()
-            && pre.query == query {
-                return Some((query, Some(pre)));
-            }
+            && pre.query == query
+        {
+            return Some((query, Some(pre)));
+        }
         Some((query, None))
     }
 
@@ -249,9 +315,10 @@ impl PlayQueue {
             cycle.remove(positions.swap_remove(index));
         }
         if let Ok(mut pre_lock) = self.preloaded.lock()
-            && pre_lock.as_ref().is_some_and(|pre| pre.query == query) {
-                *pre_lock = None;
-            }
+            && pre_lock.as_ref().is_some_and(|pre| pre.query == query)
+        {
+            *pre_lock = None;
+        }
         Some(query)
     }
 
@@ -296,6 +363,14 @@ impl PlayQueue {
 
     pub fn set_shuffle_enabled(&self, enabled: bool) {
         *self.shuffle_enabled.lock().unwrap() = enabled;
+    }
+
+    pub fn autoplay_enabled(&self) -> bool {
+        *self.autoplay_enabled.lock().unwrap()
+    }
+
+    pub fn set_autoplay_enabled(&self, enabled: bool) {
+        *self.autoplay_enabled.lock().unwrap() = enabled;
     }
 
     /// Pop previous track from history and push current back to upcoming queue
@@ -396,7 +471,7 @@ impl PlayQueue {
     }
 
     /// Preload the next track's metadata and thumbnail before current song ends
-    pub fn preload_next(&self, extractor: Arc<Extractor>) {
+    pub fn preload_next(&self, extractor: Arc<Extractor>, library: LibraryStore) {
         let next_query = match self.peek_front() {
             Some(q) => q,
             None => return,
@@ -409,9 +484,10 @@ impl PlayQueue {
             }
             if let Ok(pre_lock) = self.preloaded.lock()
                 && let Some(pre) = pre_lock.as_ref()
-                    && pre.query == next_query {
-                        return; // Already preloaded
-                    }
+                && pre.query == next_query
+            {
+                return; // Already preloaded
+            }
             *preloading = true;
         }
 
@@ -429,31 +505,18 @@ impl PlayQueue {
                     meta.duration,
                     meta.thumbnail.clone(),
                 );
-                // Pre-download cover art
                 let mut cover_path = None;
-                if let Some(thumb_url) = &meta.thumbnail {
-                    let temp_path =
-                        std::env::temp_dir().join(format!("rs_yt_cover_pre_{}.png", meta.id));
-                    let client = reqwest::Client::new();
-                    if let Ok(resp) = client.get(thumb_url).send().await
-                        && let Ok(bytes) = resp.bytes().await
-                            && let Ok(dynamic_img) = image::load_from_memory(&bytes)
-                    {
-                        let resized = if dynamic_img.width() > 256 || dynamic_img.height() > 256 {
-                            dynamic_img.thumbnail(256, 256)
-                        } else {
-                            dynamic_img
-                        };
-                        if resized
-                            .save_with_format(&temp_path, image::ImageFormat::Png)
-                            .is_ok()
-                        {
-                            cover_path = Some(temp_path);
-                        }
-                    }
+                let cached = library.cover_path(&meta.id);
+                if cached.exists() {
+                    cover_path = Some(cached);
+                } else if let Some(thumb_url) = &meta.thumbnail
+                    && let Ok(resp) = shared_http_client().get(thumb_url).send().await
+                    && let Ok(bytes) = resp.bytes().await
+                    && let Ok(saved_path) = library.store_cover(&meta.id, &bytes)
+                {
+                    cover_path = Some(saved_path);
                 }
 
-                // Check if queue front still matches this track
                 if queue_clone.peek_front().as_ref() == Some(&next_query) {
                     info!(
                         "Gapless preloader: Next track preloaded successfully: {}",
@@ -470,24 +533,60 @@ impl PlayQueue {
         });
     }
 
-    /// Prefetch related recommendations when the queue is empty
-    pub fn prefetch_autoplay(&self, extractor: Arc<Extractor>, current_id: String) {
-        if self.repeat_mode() != RepeatMode::Off {
+    /// Prefetch related recommendations with full metadata & covers when the queue is empty
+    pub fn prefetch_autoplay(
+        &self,
+        extractor: Arc<Extractor>,
+        library: LibraryStore,
+        current_id: String,
+    ) {
+        if !self.autoplay_enabled() || self.repeat_mode() != RepeatMode::Off {
             return;
         }
         let queue_clone = self.clone();
         tokio::spawn(async move {
-            let is_empty = queue_clone.is_empty();
-            if is_empty
-                && let Ok(related_ids) = extractor.extract_autoplay_next(&current_id).await
-                    && queue_clone.is_empty() && queue_clone.repeat_mode() == RepeatMode::Off {
-                        let count = related_ids.len();
-                        for id in related_ids {
-                            queue_clone
-                                .push_back(format!("https://www.youtube.com/watch?v={}", id));
-                        }
-                        info!("Prefetched {} autoplay recommendations into queue", count);
-                    }
+            if !queue_clone.is_empty() {
+                return;
+            }
+            if let Ok(related_items) = extractor.extract_autoplay_next(&current_id).await
+                && queue_clone.is_empty()
+                && queue_clone.autoplay_enabled()
+                && queue_clone.repeat_mode() == RepeatMode::Off
+            {
+                let count = related_items.len();
+                let mut records_for_cover = Vec::new();
+                for item in related_items {
+                    let url = format!("https://www.youtube.com/watch?v={}", item.id);
+                    let artist = item
+                        .uploader
+                        .clone()
+                        .unwrap_or_else(|| "YouTube Mix".into());
+                    queue_clone.set_track_info(
+                        &url,
+                        item.title.clone(),
+                        artist.clone(),
+                        item.duration,
+                        item.thumbnail.clone(),
+                    );
+                    queue_clone.push_back(url);
+                    records_for_cover.push(TrackRecord {
+                        id: item.id,
+                        title: item.title,
+                        artist,
+                        duration_secs: item.duration,
+                        thumbnail_url: item.thumbnail,
+                    });
+                }
+                info!(
+                    "Prefetched {} autoplay recommendations with full metadata into queue",
+                    count
+                );
+                let client = shared_http_client().clone();
+                for track in records_for_cover {
+                    crate::ui_models::cache_track_cover(client.clone(), library.clone(), track)
+                        .await;
+                }
+            }
         });
     }
 }

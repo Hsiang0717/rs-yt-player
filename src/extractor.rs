@@ -4,7 +4,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
-use tracing::info;
+use std::sync::OnceLock;
+use std::time::Duration;
+use tracing::{info, warn};
+
+const AUDIO_FORMAT_SELECTOR: &str = "bestaudio[ext=m4a]/bestaudio";
+
+pub fn shared_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(15))
+            .pool_max_idle_per_host(8)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioMetadata {
@@ -19,6 +35,8 @@ pub struct AudioMetadata {
     pub start_offset_secs: f32,
     #[serde(default)]
     pub http_headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub loudness_db: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,11 +111,14 @@ struct YtDlpOutput {
     id: String,
     title: String,
     uploader: Option<String>,
+    channel: Option<String>,
     duration: Option<f64>,
     thumbnail: Option<String>,
     url: String,
     acodec: Option<String>,
     http_headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    loudness_db: Option<f32>,
 }
 
 pub struct Extractor {
@@ -116,7 +137,9 @@ pub(crate) fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
     cmd
 }
 
-pub(crate) fn async_silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> tokio::process::Command {
+pub(crate) fn async_silent_command<S: AsRef<std::ffi::OsStr>>(
+    program: S,
+) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(program);
     cmd.stdin(std::process::Stdio::null());
     cmd.kill_on_drop(true);
@@ -132,9 +155,8 @@ pub(crate) fn extract_stream_url_sync(
     yt_dlp_path: &std::path::Path,
     query: &str,
 ) -> Result<(String, Option<HashMap<String, String>>)> {
-    let is_url = query.starts_with("http://")
-        || query.starts_with("https://")
-        || query.starts_with("www.");
+    let is_url =
+        query.starts_with("http://") || query.starts_with("https://") || query.starts_with("www.");
     let target = if is_url {
         query.to_string()
     } else {
@@ -146,7 +168,7 @@ pub(crate) fn extract_stream_url_sync(
             "--no-warnings",
             "--no-playlist",
             "-f",
-            "bestaudio[ext=m4a]",
+            AUDIO_FORMAT_SELECTOR,
             "-j",
             &target,
         ])
@@ -164,8 +186,8 @@ pub(crate) fn extract_stream_url_sync(
         .find(|line| line.starts_with('{') && line.ends_with('}'))
         .ok_or_else(|| anyhow!("yt-dlp returned no valid JSON during stream refresh"))?;
 
-    let parsed: YtDlpOutput =
-        serde_json::from_str(first_json_line).context("Failed to parse yt-dlp JSON during stream refresh")?;
+    let parsed: YtDlpOutput = serde_json::from_str(first_json_line)
+        .context("Failed to parse yt-dlp JSON during stream refresh")?;
 
     Ok((parsed.url, parsed.http_headers))
 }
@@ -173,11 +195,37 @@ pub(crate) fn extract_stream_url_sync(
 impl Extractor {
     pub async fn new() -> Result<Self> {
         let yt_dlp_path = Self::ensure_yt_dlp().await?;
-        Ok(Self { yt_dlp_path })
+        let extractor = Self { yt_dlp_path };
+        extractor.maybe_auto_update_in_background();
+        Ok(extractor)
     }
 
     pub fn yt_dlp_path(&self) -> &std::path::Path {
         &self.yt_dlp_path
+    }
+
+    /// Background non-blocking check to keep yt-dlp up-to-date against YouTube signature changes.
+    fn maybe_auto_update_in_background(&self) {
+        let path = self.yt_dlp_path.clone();
+        let should_update = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|mtime| mtime.elapsed().ok())
+            .is_some_and(|age| age > Duration::from_secs(7 * 24 * 3600));
+        if should_update {
+            tokio::spawn(async move {
+                info!("Running background yt-dlp self-update check (-U)...");
+                let _ = async_silent_command(&path).arg("-U").output().await;
+            });
+        }
+    }
+
+    pub fn trigger_self_update(&self) {
+        let path = self.yt_dlp_path.clone();
+        tokio::spawn(async move {
+            info!("Triggering yt-dlp self-update (-U) after extraction failure...");
+            let _ = async_silent_command(&path).arg("-U").output().await;
+        });
     }
 
     /// Search YouTube and return selectable metadata without starting playback.
@@ -215,33 +263,33 @@ impl Extractor {
 
     /// Check if yt-dlp is available in PATH or project bin dir; if not, download it.
     async fn ensure_yt_dlp() -> Result<PathBuf> {
-        // 1. Check if yt-dlp is already in PATH
         if let Ok(output) = silent_command("where.exe").arg("yt-dlp").output()
-            && output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(first_line) = stdout.lines().next() {
-                    let path = PathBuf::from(first_line.trim());
-                    if path.exists() {
-                        info!("Found yt-dlp in PATH: {:?}", path);
-                        return Ok(path);
-                    }
+            && output.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(first_line) = stdout.lines().next() {
+                let path = PathBuf::from(first_line.trim());
+                if path.exists() {
+                    info!("Found yt-dlp in PATH: {:?}", path);
+                    return Ok(path);
                 }
             }
+        }
 
-        // 2. Check executable directory and local ./bin/yt-dlp.exe
         if let Ok(exe_path) = std::env::current_exe()
-            && let Some(exe_dir) = exe_path.parent() {
-                let candidate1 = exe_dir.join("bin").join("yt-dlp.exe");
-                if candidate1.exists() {
-                    info!("Found yt-dlp near executable: {:?}", candidate1);
-                    return Ok(candidate1);
-                }
-                let candidate2 = exe_dir.join("yt-dlp.exe");
-                if candidate2.exists() {
-                    info!("Found yt-dlp in executable directory: {:?}", candidate2);
-                    return Ok(candidate2);
-                }
+            && let Some(exe_dir) = exe_path.parent()
+        {
+            let candidate1 = exe_dir.join("bin").join("yt-dlp.exe");
+            if candidate1.exists() {
+                info!("Found yt-dlp near executable: {:?}", candidate1);
+                return Ok(candidate1);
             }
+            let candidate2 = exe_dir.join("yt-dlp.exe");
+            if candidate2.exists() {
+                info!("Found yt-dlp in executable directory: {:?}", candidate2);
+                return Ok(candidate2);
+            }
+        }
 
         let local_bin = PathBuf::from("bin").join("yt-dlp.exe");
         if local_bin.exists() {
@@ -249,13 +297,11 @@ impl Extractor {
             return Ok(local_bin);
         }
 
-        // 3. Download yt-dlp.exe from GitHub
         info!("yt-dlp not found. Downloading latest yt-dlp.exe from GitHub releases...");
         std::fs::create_dir_all("bin").context("Failed to create bin directory for yt-dlp.exe")?;
 
         let download_url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-        let client = reqwest::Client::new();
-        let response = client
+        let response = shared_http_client()
             .get(download_url)
             .send()
             .await
@@ -289,7 +335,7 @@ impl Extractor {
         Ok(local_bin)
     }
 
-    /// Extract audio stream URL and video metadata from a YouTube URL or search query.
+    /// Extract audio stream URL and video metadata with kill_on_drop cancellation and exponential backoff retry.
     pub async fn extract_audio(&self, query: &str) -> Result<AudioMetadata> {
         let is_url = query.starts_with("http://")
             || query.starts_with("https://")
@@ -301,82 +347,91 @@ impl Extractor {
             format!("ytsearch1:{}", query)
         };
 
-        info!(
-            "Extracting audio stream using yt-dlp for target: {}",
-            target
-        );
+        info!("Extracting audio stream using yt-dlp for target: {}", target);
 
-        let yt_dlp_path = self.yt_dlp_path.clone();
-        let target_clone = target.clone();
-
-        // Run yt-dlp in a blocking task so Tokio runtime isn't blocked
-        let output = tokio::task::spawn_blocking(move || {
-            silent_command(&yt_dlp_path)
+        let mut last_err = anyhow!("Extraction failed");
+        for attempt in 0..2 {
+            let output = async_silent_command(&self.yt_dlp_path)
                 .args([
                     "--no-warnings",
                     "--no-playlist",
                     "-f",
-                    "bestaudio[ext=m4a]",
+                    AUDIO_FORMAT_SELECTOR,
                     "-j",
-                    &target_clone,
+                    &target,
                 ])
                 .output()
-        })
-        .await
-        .context("Failed to spawn yt-dlp worker task")?
-        .context("Failed to execute yt-dlp process")?;
+                .await
+                .context("Failed to execute yt-dlp process")?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("yt-dlp failed: {}", stderr.trim()));
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let first_json_line = stdout
+                    .lines()
+                    .find(|line| line.starts_with('{') && line.ends_with('}'))
+                    .ok_or_else(|| {
+                        anyhow!("yt-dlp returned no valid JSON line. Stdout: {}", stdout)
+                    })?;
+
+                let parsed: YtDlpOutput = serde_json::from_str(first_json_line)
+                    .context("Failed to parse yt-dlp JSON output")?;
+
+                return Ok(AudioMetadata {
+                    id: parsed.id,
+                    title: parsed.title,
+                    uploader: parsed.uploader.or(parsed.channel),
+                    duration: parsed.duration,
+                    thumbnail: parsed.thumbnail,
+                    stream_url: parsed.url,
+                    audio_codec: parsed.acodec.map(|codec| {
+                        if codec.starts_with("mp4a") {
+                            "AAC".to_string()
+                        } else if codec.contains("opus") {
+                            "OPUS".to_string()
+                        } else {
+                            codec.to_uppercase()
+                        }
+                    }),
+                    start_offset_secs: Self::start_offset_secs(query).unwrap_or(0.0),
+                    http_headers: parsed.http_headers,
+                    loudness_db: parsed.loudness_db,
+                });
+            }
+
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if stderr.contains("403") || stderr.contains("Sign in") || stderr.contains("nsig") {
+                self.trigger_self_update();
+            }
+            // Do not retry permanent unavailability errors (private, deleted, members-only)
+            if stderr.contains("Private video")
+                || stderr.contains("Video unavailable")
+                || stderr.contains("members-only")
+                || stderr.contains("has been removed")
+            {
+                return Err(anyhow!("Track unavailable: {}", stderr));
+            }
+            last_err = anyhow!("yt-dlp failed: {}", stderr);
+            if attempt == 0 {
+                warn!("Transient extraction failure (attempt 1), retrying after 600ms: {}", stderr);
+                tokio::time::sleep(Duration::from_millis(600)).await;
+            }
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let first_json_line = stdout
-            .lines()
-            .find(|line| line.starts_with('{') && line.ends_with('}'))
-            .ok_or_else(|| anyhow!("yt-dlp returned no valid JSON line. Stdout: {}", stdout))?;
-
-        let parsed: YtDlpOutput =
-            serde_json::from_str(first_json_line).context("Failed to parse yt-dlp JSON output")?;
-
-        Ok(AudioMetadata {
-            id: parsed.id,
-            title: parsed.title,
-            uploader: parsed.uploader,
-            duration: parsed.duration,
-            thumbnail: parsed.thumbnail,
-            stream_url: parsed.url,
-            audio_codec: parsed.acodec.map(|codec| {
-                if codec.starts_with("mp4a") {
-                    "AAC".to_string()
-                } else {
-                    codec
-                }
-            }),
-            start_offset_secs: Self::start_offset_secs(query).unwrap_or(0.0),
-            http_headers: parsed.http_headers,
-        })
+        Err(last_err)
     }
 
-    /// Extract video entries from a YouTube playlist URL (fast flat metadata scan)
+    /// Extract video entries from a YouTube playlist URL (cancellable via kill_on_drop)
     pub async fn extract_playlist_items(&self, playlist_url: &str) -> Result<Vec<PlaylistItem>> {
-        let yt_dlp_path = self.yt_dlp_path.clone();
-        let url_clone = playlist_url.to_string();
-
-        let output = tokio::task::spawn_blocking(move || {
-            silent_command(&yt_dlp_path)
-                .args([
-                    "--no-warnings",
-                    "--flat-playlist",
-                    "--dump-single-json",
-                    &url_clone,
-                ])
-                .output()
-        })
-        .await
-        .context("Failed to spawn yt-dlp playlist task")?
-        .context("Failed to execute yt-dlp playlist process")?;
+        let output = async_silent_command(&self.yt_dlp_path)
+            .args([
+                "--no-warnings",
+                "--flat-playlist",
+                "--dump-single-json",
+                playlist_url,
+            ])
+            .output()
+            .await
+            .context("Failed to execute yt-dlp playlist process")?;
 
         if !output.status.success() {
             return Ok(Vec::new());
@@ -392,43 +447,40 @@ impl Extractor {
             .collect())
     }
 
-    /// Extract next related video IDs for continuous autoplay (YouTube Radio Mix)
-    pub async fn extract_autoplay_next(&self, current_video_id: &str) -> Result<Vec<String>> {
+    /// Extract next related tracks with FULL metadata (title, artist, duration, thumbnail)
+    /// for continuous autoplay (YouTube Radio Mix)
+    pub async fn extract_autoplay_next(&self, current_video_id: &str) -> Result<Vec<PlaylistItem>> {
         let mix_url = format!(
             "https://www.youtube.com/watch?v={}&list=RD{}",
             current_video_id, current_video_id
         );
-        let yt_dlp_path = self.yt_dlp_path.clone();
 
-        let output = tokio::task::spawn_blocking(move || {
-            silent_command(&yt_dlp_path)
-                .args([
-                    "--no-warnings",
-                    "--flat-playlist",
-                    "--playlist-items",
-                    "2:6",
-                    "--print",
-                    "%(id)s",
-                    &mix_url,
-                ])
-                .output()
-        })
-        .await
-        .context("Failed to spawn yt-dlp autoplay task")?
-        .context("Failed to execute yt-dlp autoplay process")?;
+        let output = async_silent_command(&self.yt_dlp_path)
+            .args([
+                "--no-warnings",
+                "--flat-playlist",
+                "--playlist-items",
+                "2:6",
+                "--dump-single-json",
+                &mix_url,
+            ])
+            .output()
+            .await
+            .context("Failed to execute yt-dlp autoplay process")?;
 
         if !output.status.success() {
             return Ok(Vec::new());
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let ids: Vec<String> = stdout
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty() && l != current_video_id)
-            .collect();
-
-        Ok(ids)
+        let playlist: FlatPlaylist = serde_json::from_slice(&output.stdout)
+            .context("Failed to parse yt-dlp autoplay output")?;
+        Ok(playlist
+            .entries
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(FlatPlaylistEntry::into_playlist_item)
+            .filter(|item| item.id != current_video_id)
+            .collect())
     }
 }
 

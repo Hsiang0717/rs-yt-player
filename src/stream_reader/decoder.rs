@@ -1,5 +1,6 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::io::{Read, Seek, SeekFrom};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{Decoder, DecoderOptions};
@@ -17,19 +18,22 @@ pub struct DecodedAudioSource {
     track_id: u32,
     sample_rate: u32,
     channels: u16,
-    samples: Vec<f32>,
+    sample_buf: Option<SampleBuffer<f32>>,
     sample_position: usize,
+    sample_len: usize,
     samples_to_skip: u64,
+    consumed_samples: Arc<AtomicU64>,
+    loudness_gain: f32,
 }
 
 struct ProbeGateSource {
     inner: Box<dyn MediaSource>,
-    allow_seek: Arc<std::sync::atomic::AtomicBool>,
+    allow_seek: Arc<AtomicBool>,
 }
 
 impl MediaSource for ProbeGateSource {
     fn is_seekable(&self) -> bool {
-        self.allow_seek.load(std::sync::atomic::Ordering::Acquire)
+        self.allow_seek.load(Ordering::Acquire)
     }
 
     fn byte_len(&self) -> Option<u64> {
@@ -89,21 +93,32 @@ impl DecodedAudioSource {
         Self::from_media_source(Box::new(source), start_offset_secs, true)
     }
 
+    pub fn with_loudness_gain(mut self, gain: f32) -> Self {
+        self.loudness_gain = gain.clamp(0.25, 2.0);
+        self
+    }
+
+    pub fn consumed_samples(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.consumed_samples)
+    }
+
+    pub fn samples_per_second(&self) -> u64 {
+        (self.sample_rate as u64).saturating_mul(self.channels as u64)
+    }
+
     fn from_media_source(
         source: Box<dyn MediaSource>,
         start_offset_secs: f32,
         seekable: bool,
     ) -> Result<Self> {
-        // Crucial optimization for multi-hour audio: keep is_seekable false during probe
-        // so Symphonia's ISOBMFF demuxer stops at the first fragment instead of issuing
-        // hundreds or thousands of HTTP Range seeks to scan all movie fragments across the file!
-        let allow_seek = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let allow_seek = Arc::new(AtomicBool::new(false));
         let gate_source = ProbeGateSource {
             inner: source,
             allow_seek: Arc::clone(&allow_seek),
         };
 
-        let stream = MediaSourceStream::new(Box::new(gate_source), MediaSourceStreamOptions::default());
+        let stream =
+            MediaSourceStream::new(Box::new(gate_source), MediaSourceStreamOptions::default());
         let mut hint = Hint::new();
         hint.with_extension("m4a");
 
@@ -114,10 +129,10 @@ impl DecodedAudioSource {
                 &FormatOptions::default(),
                 &MetadataOptions::default(),
             )
-            .context("Unable to identify the downloaded AAC audio stream")?;
+            .context("Unable to identify the downloaded audio stream")?;
 
         if seekable {
-            allow_seek.store(true, std::sync::atomic::Ordering::Release);
+            allow_seek.store(true, Ordering::Release);
         }
 
         let mut format = probed.format;
@@ -125,10 +140,7 @@ impl DecodedAudioSource {
             .default_track()
             .ok_or_else(|| anyhow!("The audio stream contains no playable track"))?;
         let track_id = track.id;
-        let time_base = track
-            .codec_params
-            .time_base
-            .context("The audio stream does not declare a seek time base")?;
+        let time_base = track.codec_params.time_base;
         let sample_rate = track
             .codec_params
             .sample_rate
@@ -142,20 +154,25 @@ impl DecodedAudioSource {
             .make(&track.codec_params, &DecoderOptions::default())
             .context("No built-in decoder is available for this audio stream")?;
         let samples_to_skip = if seekable && start_offset_secs > 0.0 {
-            let seeked = format
-                .seek(
-                    SeekMode::Accurate,
-                    SeekTo::Time {
-                        time: symphonia::core::units::Time::from(start_offset_secs as f64),
-                        track_id: Some(track_id),
-                    },
-                )
-                .context("The AAC container could not seek to the requested playback time")?;
-            let actual_time = time_base.calc_time(seeked.actual_ts);
-            let actual_seconds = actual_time.seconds as f64 + actual_time.frac;
-            ((start_offset_secs as f64 - actual_seconds).max(0.0)
-                * sample_rate as f64
-                * channels as f64) as u64
+            if let Ok(seeked) = format.seek(
+                SeekMode::Accurate,
+                SeekTo::Time {
+                    time: symphonia::core::units::Time::from(start_offset_secs as f64),
+                    track_id: Some(track_id),
+                },
+            ) {
+                if let Some(tb) = time_base {
+                    let actual_time = tb.calc_time(seeked.actual_ts);
+                    let actual_seconds = actual_time.seconds as f64 + actual_time.frac;
+                    ((start_offset_secs as f64 - actual_seconds).max(0.0)
+                        * sample_rate as f64
+                        * channels as f64) as u64
+                } else {
+                    0
+                }
+            } else {
+                (start_offset_secs.max(0.0) * sample_rate as f32 * channels as f32) as u64
+            }
         } else {
             (start_offset_secs.max(0.0) * sample_rate as f32 * channels as f32) as u64
         };
@@ -166,9 +183,12 @@ impl DecodedAudioSource {
             track_id,
             sample_rate,
             channels,
-            samples: Vec::new(),
+            sample_buf: None,
             sample_position: 0,
+            sample_len: 0,
             samples_to_skip,
+            consumed_samples: Arc::new(AtomicU64::new(0)),
+            loudness_gain: 1.0,
         })
     }
 
@@ -197,7 +217,7 @@ impl DecodedAudioSource {
             let decoded = match self.decoder.decode(&packet) {
                 Ok(decoded) => decoded,
                 Err(SymphoniaError::DecodeError(error)) => {
-                    tracing::debug!("Skipping an undecodable AAC packet: {}", error);
+                    tracing::debug!("Skipping an undecodable audio packet: {}", error);
                     continue;
                 }
                 Err(SymphoniaError::ResetRequired) => {
@@ -209,12 +229,20 @@ impl DecodedAudioSource {
                     return false;
                 }
             };
-            let mut samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
-            samples.copy_interleaved_ref(decoded);
-            self.samples.clear();
-            self.samples.extend_from_slice(samples.samples());
+
+            let required_capacity = decoded.capacity();
+            let spec = *decoded.spec();
+            let buf = match &mut self.sample_buf {
+                Some(existing) if existing.capacity() >= required_capacity => existing,
+                slot => {
+                    *slot = Some(SampleBuffer::<f32>::new(required_capacity as u64, spec));
+                    slot.as_mut().unwrap()
+                }
+            };
+            buf.copy_interleaved_ref(decoded);
+            self.sample_len = buf.len();
             self.sample_position = 0;
-            if !self.samples.is_empty() {
+            if self.sample_len > 0 {
                 return true;
             }
         }
@@ -226,18 +254,20 @@ impl Iterator for DecodedAudioSource {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if self.sample_position >= self.samples.len() && !self.decode_next_packet() {
+            if self.sample_position >= self.sample_len && !self.decode_next_packet() {
                 return None;
             }
             if self.samples_to_skip > 0 {
-                let remaining = self.samples.len() - self.sample_position;
+                let remaining = self.sample_len - self.sample_position;
                 let skip = remaining.min(self.samples_to_skip.min(usize::MAX as u64) as usize);
                 self.sample_position += skip;
                 self.samples_to_skip -= skip as u64;
                 continue;
             }
-            let sample = self.samples[self.sample_position];
+            let buf = self.sample_buf.as_ref()?;
+            let sample = buf.samples()[self.sample_position] * self.loudness_gain;
             self.sample_position += 1;
+            self.consumed_samples.fetch_add(1, Ordering::Relaxed);
             return Some(sample);
         }
     }
