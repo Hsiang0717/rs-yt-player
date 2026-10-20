@@ -15,6 +15,16 @@ use super::{LoadingAbortHandle, SmtcHandle, play_track, play_with_metadata};
 
 static LAST_PREV_CLICK: Mutex<Option<Instant>> = Mutex::new(None);
 
+struct AdvancingGuard(Arc<Mutex<bool>>);
+
+impl Drop for AdvancingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.0.lock() {
+            *guard = false;
+        }
+    }
+}
+
 pub fn trigger_next(
     extractor: Arc<Extractor>,
     player: Arc<AudioPlayer>,
@@ -43,13 +53,11 @@ pub fn trigger_next(
         let adv_lock = Arc::clone(&is_advancing);
         let abort_handle = loading_abort.clone();
         let join_handle = tokio::spawn(async move {
+            let _guard = AdvancingGuard(adv_lock);
             play_track(
                 current, extractor, player, smtc, ui_weak, queue, library, last_query,
             )
             .await;
-            if let Ok(mut guard) = adv_lock.lock() {
-                *guard = false;
-            }
         });
         if let Ok(mut guard) = abort_handle.lock()
             && let Some(prev) = guard.replace(join_handle.abort_handle())
@@ -70,6 +78,7 @@ pub fn trigger_next(
         let adv_lock = Arc::clone(&is_advancing);
         let abort_handle = loading_abort.clone();
         let join_handle = tokio::spawn(async move {
+            let _guard = AdvancingGuard(adv_lock);
             if let Some(preloaded) = maybe_preloaded {
                 info!(
                     "Seamless transition using preloaded track: {}",
@@ -99,9 +108,6 @@ pub fn trigger_next(
                 )
                 .await;
             }
-            if let Ok(mut guard) = adv_lock.lock() {
-                *guard = false;
-            }
         });
         if let Ok(mut guard) = abort_handle.lock()
             && let Some(prev) = guard.replace(join_handle.abort_handle())
@@ -111,6 +117,13 @@ pub fn trigger_next(
     } else {
         *advancing = false;
         info!("Next track requested, but queue is empty.");
+        if natural_end {
+            player.stop();
+            let _ = ui_weak.upgrade_in_event_loop(|ui| {
+                ui.set_is_playing(false);
+                ui.set_track_status(slint::SharedString::from("STOPPED"));
+            });
+        }
     }
 }
 
@@ -167,13 +180,11 @@ pub fn trigger_previous(
         let adv_lock = Arc::clone(&is_advancing);
         let abort_handle = loading_abort.clone();
         let join_handle = tokio::spawn(async move {
+            let _guard = AdvancingGuard(adv_lock);
             play_track(
                 prev_query, extractor, player, smtc, ui_weak, queue, library, last_query,
             )
             .await;
-            if let Ok(mut guard) = adv_lock.lock() {
-                *guard = false;
-            }
         });
         if let Ok(mut guard) = abort_handle.lock()
             && let Some(prev) = guard.replace(join_handle.abort_handle())

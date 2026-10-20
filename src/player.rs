@@ -601,9 +601,23 @@ impl AudioPlayer {
         if self.stream_error().is_some() {
             return false;
         }
-        let playback_active = {
+        let (playback_active, reached_duration) = {
             let timing = self.timing.lock().unwrap();
-            !timing.is_paused && timing.start_instant.is_some()
+            let active = !timing.is_paused && timing.start_instant.is_some();
+            let reached = timing.total_duration_secs > 0.0
+                && if let Some(counter) = &timing.consumed_samples
+                    && timing.samples_per_sec > 0
+                {
+                    let samples = counter.load(Ordering::Relaxed);
+                    let elapsed = (samples as f64 / timing.samples_per_sec as f64) as f32;
+                    (timing.base_offset_secs + elapsed) >= timing.total_duration_secs
+                } else if let Some(instant) = timing.start_instant {
+                    (timing.base_offset_secs + instant.elapsed().as_secs_f32())
+                        >= timing.total_duration_secs
+                } else {
+                    false
+                };
+            (active, reached)
         };
         if !playback_active {
             return false;
@@ -616,7 +630,8 @@ impl AudioPlayer {
         } else {
             false
         };
-        stream_finished && self.sink.lock().unwrap().empty()
+        (stream_finished && self.sink.lock().unwrap().empty())
+            || (reached_duration && !self.is_buffering())
     }
 
     #[allow(dead_code)]
