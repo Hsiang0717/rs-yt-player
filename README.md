@@ -1,4 +1,4 @@
-# Rust YouTube Pure-Audio Player (rs-yt-player)
+# YouTube Audio Player (rs-yt-player)
 
 基於 **Rust** 開發的 Windows 純音訊串流音樂播放器，專注於**極致輕量、無廣告干擾、低資源佔用與常駐系統匣 (System Tray)**。
 
