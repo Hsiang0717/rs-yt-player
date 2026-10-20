@@ -3,7 +3,37 @@ use crate::library::{LibraryStore, TrackRecord};
 use crate::queue::PlayQueue;
 use crate::{AppWindow, TrackRow};
 use slint::ComponentHandle;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use tracing::info;
+
+thread_local! {
+    static COVER_IMAGE_CACHE: RefCell<HashMap<String, slint::Image>> = RefCell::new(HashMap::new());
+}
+
+/// Loads a track cover image using an in-memory UI thread cache to avoid redundant PNG disk decoding.
+pub fn load_cached_cover_image(library: &LibraryStore, id: &str) -> Option<slint::Image> {
+    if id.is_empty() {
+        return None;
+    }
+    let cached = COVER_IMAGE_CACHE.with(|cache| cache.borrow().get(id).cloned());
+    if let Some(img) = cached {
+        return Some(img);
+    }
+    let cover_file = library.cover_path(id);
+    if !cover_file.exists() {
+        return None;
+    }
+    let img = slint::Image::load_from_path(&cover_file).ok()?;
+    COVER_IMAGE_CACHE.with(|cache| {
+        let mut map = cache.borrow_mut();
+        if map.len() >= 250 {
+            map.clear();
+        }
+        map.insert(id.to_string(), img.clone());
+    });
+    Some(img)
+}
 
 pub fn sanitize_text(raw: &str) -> String {
     raw.chars()
@@ -66,12 +96,7 @@ pub fn track_row_model(
     let rows = tracks
         .into_iter()
         .map(|(track, key)| {
-            let cover_file = library.cover_path(&track.id);
-            let cover = if cover_file.exists() {
-                slint::Image::load_from_path(&cover_file).unwrap_or_default()
-            } else {
-                slint::Image::default()
-            };
+            let cover = load_cached_cover_image(library, &track.id).unwrap_or_default();
             let duration = track.duration_label();
             let is_current = if !curr.is_empty() {
                 key == curr
@@ -138,7 +163,8 @@ pub fn apply_queue_expanded(ui: &AppWindow, expanded: bool) {
     } else {
         185.0
     };
-    ui.window().set_size(slint::LogicalSize::new(logical_w, target_h));
+    ui.window()
+        .set_size(slint::LogicalSize::new(logical_w, target_h));
     ui.set_queue_expanded(expanded);
 }
 
@@ -157,7 +183,11 @@ pub fn update_queue_ui(
     });
 }
 
-pub async fn cache_track_cover(client: reqwest::Client, library: LibraryStore, track: TrackRecord) {
+pub async fn cache_track_cover(
+    client: reqwest::Client,
+    library: LibraryStore,
+    track: TrackRecord,
+) {
     if library.cover_path(&track.id).exists() {
         return;
     }
@@ -166,10 +196,11 @@ pub async fn cache_track_cover(client: reqwest::Client, library: LibraryStore, t
     };
     if let Ok(response) = client.get(url).send().await
         && response.status().is_success()
-            && let Ok(bytes) = response.bytes().await
-                && let Err(error) = library.store_cover(&track.id, &bytes) {
-                    info!("Could not cache cover art: {:#}", error);
-                }
+        && let Ok(bytes) = response.bytes().await
+        && let Err(error) = library.store_cover(&track.id, &bytes)
+    {
+        info!("Could not cache cover art: {:#}", error);
+    }
 }
 
 pub fn is_url(query: &str) -> bool {

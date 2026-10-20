@@ -1,13 +1,10 @@
-import { LineEdit, ListView } from "std-widgets.slint";
-import { Theme } from "theme.slint";
+import { Theme, TooltipState } from "theme.slint";
 import { TrackRow } from "models.slint";
 export { TrackRow }
 
-import { InteractiveProgressBar } from "components/progress_bar.slint";
-import { InteractiveVolumeBar } from "components/volume_bar.slint";
-import { LoadingSpinner } from "components/loading_spinner.slint";
-import { IconButton } from "components/icon_button.slint";
-import { TrackItemView } from "views/track_item.slint";
+import { TitleBarView } from "views/title_bar.slint";
+import { PlayerDeckView } from "views/player_deck.slint";
+import { PlaylistDrawerView } from "views/playlist_drawer.slint";
 
 export component AppWindow inherits Window {
     title: "YouTube Audio Player";
@@ -20,6 +17,7 @@ export component AppWindow inherits Window {
     max-height: 100000px;
     background: Theme.bg;
     default-font-family: "Segoe UI, sans-serif";
+    forward-focus: key_scope;
 
     // --- State Properties (Decoupled Visual State) ---
     in-out property <string> track_title: "Ready to Play";
@@ -34,16 +32,20 @@ export component AppWindow inherits Window {
     in-out property <image> cover_image;
     in-out property <bool> has_cover: false;
 
-    // Visual Progress: Normalized 0.0 to 1.0 (Timer purely updates this)
+    // Visual Progress: Normalized 0.0 to 1.0
     in-out property <float> progress_ratio: 0.0;
     in-out property <float> buffer_ratio: 0.0;
     in-out property <bool> is_scrubbing: false;
     in-out property <bool> has_active_track: false;
 
-    // Visual Volume: Normalized 0.0 to 1.0
+    // Visual Volume & Modes
     in-out property <float> volume_ratio: 1.0;
     in-out property <bool> is_muted: false;
     in-out property <bool> queue_expanded: false;
+    in-out property <bool> pinned_on_top: false;
+    always-on-top: root.pinned_on_top;
+    in-out property <bool> autoplay_enabled: true;
+    in-out property <string> sleep_timer_label: "";
     in-out property <string> panel_tab: "QUEUE";
     in-out property <string> panel_message: "";
     in-out property <[TrackRow]> search_results: [];
@@ -59,15 +61,19 @@ export component AppWindow inherits Window {
 
     // --- Callbacks (Window Management) ---
     callback start_window_drag();
+    callback toggle_always_on_top();
     callback minimize_window();
     callback close_window();
 
-    // --- Callbacks (User Intent Only, Never triggered by Timer) ---
+    // --- Callbacks (User Intent Only) ---
     callback search_and_play(string);
     callback cancel_loading();
     callback select_panel_tab(string);
     callback play_search_result(string);
     callback enqueue_search_result(string);
+    callback play_next_in_queue(string);
+    callback play_all(string);
+    callback enqueue_all(string);
     callback toggle_search_favorite(string);
     callback play_queue_item(int);
     callback remove_queue_item(int);
@@ -80,6 +86,8 @@ export component AppWindow inherits Window {
     callback favorite_history(string);
     callback cycle_repeat_mode();
     callback toggle_shuffle();
+    callback toggle_autoplay();
+    callback cycle_sleep_timer();
     callback retry_playback();
     callback toggle_current_favorite();
     callback toggle_play_pause();
@@ -88,693 +96,177 @@ export component AppWindow inherits Window {
     callback stop();
     callback on_user_scrub(float);
     callback on_user_seek(float);
+    callback seek_relative(float);
     callback on_user_volume(float);
     callback toggle_mute();
     callback toggle_queue();
 
-    VerticalLayout {
-        spacing: 0px;
+    // Global Keyboard Shortcuts Scope (Active when search input is not focused)
+    key_scope := FocusScope {
+        width: 100%;
+        height: 100%;
 
-        // ==========================================
-        // 1. 自訂標題列 + 整合式全域搜尋列 (Height: 42px)
-        // ==========================================
-        Rectangle {
-            height: 42px;
-            background: Theme.bg;
+        key-pressed(event) => {
+            if (title_bar.has_search_focus()) {
+                return reject;
+            }
+            if (event.modifiers.control && (event.text == "f" || event.text == "F" || event.text == "l" || event.text == "L")) {
+                title_bar.focus_search();
+                return accept;
+            }
+            if (event.text == "/") {
+                title_bar.focus_search();
+                return accept;
+            }
+            if (event.text == " ") {
+                root.toggle_play_pause();
+                return accept;
+            }
+            if (event.text == Key.LeftArrow) {
+                if (event.modifiers.control) {
+                    root.play_previous();
+                } else {
+                    root.seek_relative(-5.0);
+                }
+                return accept;
+            }
+            if (event.text == Key.RightArrow) {
+                if (event.modifiers.control) {
+                    root.play_next();
+                } else {
+                    root.seek_relative(5.0);
+                }
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.on_user_volume(Math.min(1.0, root.volume_ratio + 0.05));
+                root.volume_ratio = Math.min(1.0, root.volume_ratio + 0.05);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.on_user_volume(Math.max(0.0, root.volume_ratio - 0.05));
+                root.volume_ratio = Math.max(0.0, root.volume_ratio - 0.05);
+                return accept;
+            }
+            if (event.text == "m" || event.text == "M") {
+                root.toggle_mute();
+                return accept;
+            }
+            return reject;
+        }
+
+        VerticalLayout {
+            spacing: 0px;
+
+            title_bar := TitleBarView {
+                search_query <=> root.search_query;
+                always_on_top: root.pinned_on_top;
+                start_window_drag => { root.start_window_drag(); }
+                search_accepted(q) => {
+                    root.panel_tab = "SEARCH";
+                    root.queue_expanded = true;
+                    root.search_and_play(q);
+                }
+                toggle_always_on_top => { root.toggle_always_on_top(); }
+                minimize_window => { root.minimize_window(); }
+                close_window => { root.close_window(); }
+                focus_returned => { key_scope.focus(); }
+            }
+
+            PlayerDeckView {
+                track_title: root.track_title;
+                track_artist: root.track_artist;
+                time_current: root.time_current;
+                time_total: root.time_total;
+                track_status: root.track_status;
+                track_badge: root.track_badge;
+                is_playing: root.is_playing;
+                is_loading: root.is_loading;
+                cover_image: root.cover_image;
+                has_cover: root.has_cover;
+                progress_ratio <=> root.progress_ratio;
+                buffer_ratio <=> root.buffer_ratio;
+                is_scrubbing <=> root.is_scrubbing;
+                has_active_track: root.has_active_track;
+                volume_ratio <=> root.volume_ratio;
+                is_muted: root.is_muted;
+                queue_expanded: root.queue_expanded;
+                shuffle_enabled: root.shuffle_enabled;
+                repeat_mode_label: root.repeat_mode_label;
+                autoplay_enabled: root.autoplay_enabled;
+                sleep_timer_label: root.sleep_timer_label;
+                can_retry: root.can_retry;
+                current_track_key: root.current_track_key;
+                current_is_favorite: root.current_is_favorite;
+
+                background_clicked => { title_bar.clear_search_focus(); }
+                cancel_loading => { root.cancel_loading(); }
+                retry_playback => { root.retry_playback(); }
+                toggle_current_favorite => { root.toggle_current_favorite(); }
+                toggle_autoplay => { root.toggle_autoplay(); }
+                cycle_sleep_timer => { root.cycle_sleep_timer(); }
+                on_user_scrub(r) => { root.on_user_scrub(r); }
+                on_user_seek(r) => { root.on_user_seek(r); }
+                toggle_shuffle => { root.toggle_shuffle(); }
+                play_previous => { root.play_previous(); }
+                toggle_play_pause => { root.toggle_play_pause(); }
+                play_next => { root.play_next(); }
+                cycle_repeat_mode => { root.cycle_repeat_mode(); }
+                toggle_mute => { root.toggle_mute(); }
+                on_user_volume(v) => { root.on_user_volume(v); }
+                toggle_queue => { root.toggle_queue(); }
+            }
+
+            if root.queue_expanded: PlaylistDrawerView {
+                panel_tab: root.panel_tab;
+                panel_message: root.panel_message;
+                search_results: root.search_results;
+                queue_items: root.queue_items;
+                favorite_items: root.favorite_items;
+                history_items: root.history_items;
+
+                background_clicked => { title_bar.clear_search_focus(); }
+                select_panel_tab(tab) => { root.select_panel_tab(tab); }
+                clear_queue => { root.clear_queue(); }
+                play_all(tab) => { root.play_all(tab); }
+                enqueue_all(tab) => { root.enqueue_all(tab); }
+
+                play_search_result(k) => { root.play_search_result(k); }
+                play_next_track(k) => { root.play_next_in_queue(k); }
+                enqueue_track(k) => { root.enqueue_search_result(k); }
+                toggle_search_favorite(k) => { root.toggle_search_favorite(k); }
+
+                play_queue_item(i) => { root.play_queue_item(i); }
+                remove_queue_item(i) => { root.remove_queue_item(i); }
+                move_queue_item_up(i) => { root.move_queue_item_up(i); }
+                move_queue_item_down(i) => { root.move_queue_item_down(i); }
+
+                play_favorite(k) => { root.play_favorite(k); }
+                remove_favorite(k) => { root.remove_favorite(k); }
+
+                play_history(k) => { root.play_history(k); }
+                favorite_history(k) => { root.favorite_history(k); }
+            }
+        }
+
+        // Non-clipped Floating Tooltip Pill
+        if TooltipState.text != "": Rectangle {
+            x: 12px;
+            y: 44px;
+            z: 999;
+            height: 20px;
+            width: tooltip_txt.preferred-width + 14px;
+            border-radius: 4px;
+            background: Theme.surface_active;
             border-width: 1px;
-            border-color: Theme.border_subtle;
-
-            // 背景拖曳區 (點擊未被子元素覆蓋的空白處拖曳視窗)
-            TouchArea {
-                moved => { root.start_window_drag(); }
-                clicked => { search_input.clear-focus(); }
-            }
-
-            HorizontalLayout {
-                padding-left: 14px;
-                padding-right: 8px;
-                spacing: 12px;
-
-                // 1. 左側 App 品牌識別 (保證單行、水平垂直完美居中)
-                HorizontalLayout {
-                    spacing: 7px;
-                    alignment: start;
-                    y: (parent.height - self.height) / 2;
-                    height: 20px;
-                    horizontal-stretch: 0;
-                    min-width: 85px;
-
-                    Image {
-                        source: @image-url("icons/music-note.svg");
-                        width: 15px;
-                        height: 15px;
-                        colorize: Theme.accent_primary;
-                        y: (parent.height - self.height) / 2;
-                    }
-
-                    Text {
-                        text: "YT Audio";
-                        color: Theme.accent_primary;
-                        font-weight: 700;
-                        font-size: 13px;
-                        vertical-alignment: center;
-                    }
-                }
-
-                // 2. 中央整合式搜尋框膠囊 (自適應居中展開，維持 220px ~ 340px 寬度)
-                Rectangle {
-                    horizontal-stretch: 1;
-                    min-width: 200px;
-                    max-width: 340px;
-                    height: 30px;
-                    y: (parent.height - self.height) / 2;
-                    background: Theme.surface;
-                    border-radius: 6px;
-                    border-width: 1px;
-                    border-color: search_input.has-focus ? Theme.accent_primary : Theme.border_subtle;
-                    animate border-color { duration: 100ms; }
-                    clip: true;
-
-                    TouchArea {
-                        clicked => {
-                            search_input.focus();
-                        }
-                    }
-
-                    HorizontalLayout {
-                        width: 100%;
-                        height: 100%;
-                        padding-left: 10px;
-                        padding-right: 8px;
-                        spacing: 8px;
-
-                        Image {
-                            source: @image-url("icons/search.svg");
-                            width: 14px;
-                            height: 14px;
-                            colorize: search_input.has-focus ? Theme.accent_primary : Theme.text_muted;
-                            y: (parent.height - self.height) / 2;
-                            animate colorize { duration: 100ms; }
-                        }
-
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            min-width: 0px;
-                            clip: true;
-
-                            search_input := TextInput {
-                                width: 100%;
-                                height: 100%;
-                                single-line: true;
-                                text <=> root.search_query;
-                                font-size: 11.5px;
-                                color: Theme.text_primary;
-                                vertical-alignment: center;
-                                accepted => {
-                                    if (self.text != "") {
-                                        root.panel_tab = "SEARCH";
-                                        root.queue_expanded = true;
-                                        root.search_and_play(self.text);
-                                    }
-                                    self.clear-focus();
-                                }
-                                key-pressed(event) => {
-                                    if (event.text == Key.Escape) {
-                                        self.clear-focus();
-                                        return accept;
-                                    }
-                                    return reject;
-                                }
-                            }
-
-                            if root.search_query == "": Text {
-                                width: 100%;
-                                text: "Search song, playlist, or paste URL...";
-                                font-size: 11.5px;
-                                color: Theme.text_muted;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-                        }
-
-                        if root.search_query != "": IconButton {
-                            width: 20px;
-                            height: 20px;
-                            y: (parent.height - self.height) / 2;
-                            icon: @image-url("icons/close.svg");
-                            icon_size: 11px;
-                            default_color: Theme.text_muted;
-                            hover_color: Theme.text_primary;
-                            clicked => {
-                                root.search_query = "";
-                                search_input.focus();
-                            }
-                        }
-                    }
-                }
-
-                // 3. 右側自訂視窗控制按鈕 (_ / ✕) (貼齊右側垂直置中)
-                HorizontalLayout {
-                    spacing: 4px;
-                    alignment: end;
-                    y: (parent.height - self.height) / 2;
-                    height: 28px;
-                    horizontal-stretch: 0;
-                    min-width: 60px;
-
-                    IconButton {
-                        width: 28px;
-                        height: 28px;
-                        icon: @image-url("icons/minimize.svg");
-                        icon_size: 13px;
-                        default_color: Theme.text_secondary;
-                        hover_color: Theme.text_primary;
-                        clicked => { root.minimize_window(); }
-                    }
-
-                    IconButton {
-                        width: 28px;
-                        height: 28px;
-                        icon: @image-url("icons/close.svg");
-                        icon_size: 13px;
-                        default_color: Theme.text_secondary;
-                        hover_color: Theme.accent_danger;
-                        clicked => { root.close_window(); }
-                    }
-                }
-            }
-        }
-
-        // ==========================================
-        // 2. 核心播放艙 (Player Deck) (Height: 143px)
-        // ==========================================
-        Rectangle {
-            height: 143px;
-            background: Theme.bg;
-
-            TouchArea {
-                clicked => { search_input.clear-focus(); }
-            }
-
-            HorizontalLayout {
-                padding-left: 14px;
-                padding-right: 14px;
-                padding-top: 10px;
-                padding-bottom: 10px;
-                spacing: 14px;
-
-                // 2.1 專輯封面 (圓角 8px、沉浸深色背景)
-                Rectangle {
-                    width: 108px;
-                    height: 108px;
-                    border-radius: 8px;
-                    background: Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.border;
-                    clip: true;
-
-                    if !root.has_cover: Rectangle {
-                        width: 100%;
-                        height: 100%;
-                        background: Theme.panel_bg;
-
-                        Image {
-                            source: @image-url("icons/music-note.svg");
-                            width: 36px;
-                            height: 36px;
-                            colorize: Theme.accent_primary;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                        }
-                    }
-
-                    if root.has_cover: Image {
-                        source: root.cover_image;
-                        image-fit: cover;
-                        width: 100%;
-                        height: 100%;
-                    }
-                }
-
-                // 2.2 右側資訊艙：歌名/作者 + 進度條 + 集中控制列
-                VerticalLayout {
-                    horizontal-stretch: 1;
-                    alignment: space-between;
-
-                    // 歌名與作者 (寬度完全解放，不再受搜尋框壓迫)
-                    HorizontalLayout {
-                        alignment: space-between;
-                        spacing: 8px;
-
-                        VerticalLayout {
-                            horizontal-stretch: 1;
-                            spacing: 3px;
-                            alignment: center;
-
-                            Text {
-                                text: root.track_title;
-                                font-size: 14px;
-                                font-weight: 700;
-                                color: Theme.text_primary;
-                                overflow: elide;
-                                horizontal-alignment: left;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                alignment: start;
-
-                                Text {
-                                    text: root.track_artist;
-                                    font-size: 11px;
-                                    color: Theme.text_secondary;
-                                    overflow: elide;
-                                    horizontal-stretch: 1;
-                                    horizontal-alignment: left;
-                                }
-
-                                if root.is_loading: LoadingSpinner {
-                                    loading: root.is_loading;
-                                }
-
-                                Text {
-                                    text: root.track_status;
-                                    font-size: 10px;
-                                    font-weight: 600;
-                                    color: root.track_status == "ERROR" ? Theme.accent_danger : (root.is_loading || root.track_status == "BUFFERING" || root.track_status == "SEARCHING" ? Theme.accent_gold : (root.is_playing ? Theme.accent_primary : Theme.text_muted));
-                                }
-                            }
-                        }
-
-                        // 右側 Badges & 收藏按鈕
-                        HorizontalLayout {
-                            spacing: 6px;
-                            alignment: start;
-
-                            // Codec Badge (AAC / OPUS)
-                            Rectangle {
-                                height: 22px;
-                                border-radius: 4px;
-                                background: Theme.surface;
-                                border-width: 1px;
-                                border-color: Theme.border;
-
-                                HorizontalLayout {
-                                    padding-left: 6px;
-                                    padding-right: 6px;
-                                    alignment: center;
-
-                                    Text {
-                                        text: root.track_badge;
-                                        font-size: 9.5px;
-                                        font-weight: 700;
-                                        color: Theme.accent_primary;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-
-                            if root.is_loading: IconButton {
-                                width: 22px;
-                                height: 22px;
-                                icon: @image-url("icons/close.svg");
-                                icon_size: 11px;
-                                default_color: Theme.accent_danger;
-                                hover_color: #E09E8A;
-                                clicked => { root.cancel_loading(); }
-                            }
-
-                            if root.can_retry: IconButton {
-                                width: 22px;
-                                height: 22px;
-                                icon: @image-url("icons/repeat.svg");
-                                icon_size: 12px;
-                                default_color: Theme.accent_primary;
-                                hover_color: Theme.accent_primary_hover;
-                                clicked => { root.retry_playback(); }
-                            }
-
-                            if root.current_track_key != "": IconButton {
-                                width: 24px;
-                                height: 22px;
-                                icon: root.current_is_favorite ? @image-url("icons/heart-filled.svg") : @image-url("icons/heart.svg");
-                                icon_size: 14px;
-                                active: root.current_is_favorite;
-                                active_color: Theme.accent_gold;
-                                default_color: Theme.text_secondary;
-                                clicked => { root.toggle_current_favorite(); }
-                            }
-                        }
-                    }
-
-                    // 雙側時間包夾式進度條 (時間拉滿兩側，進度條精準拖曳)
-                    HorizontalLayout {
-                        spacing: 8px;
-
-                        Text {
-                            text: root.time_current;
-                            font-size: 10.5px;
-                            color: Theme.text_muted;
-                            min-width: 32px;
-                            horizontal-alignment: left;
-                            vertical-alignment: center;
-                        }
-
-                        InteractiveProgressBar {
-                            horizontal-stretch: 1;
-                            ratio <=> root.progress_ratio;
-                            buffer_ratio <=> root.buffer_ratio;
-                            is_scrubbing <=> root.is_scrubbing;
-                            enabled: root.has_active_track;
-                            user_scrub(r) => { root.on_user_scrub(r); }
-                            user_seek(r) => { root.on_user_seek(r); }
-                        }
-
-                        Text {
-                            text: root.time_total;
-                            font-size: 10.5px;
-                            color: Theme.text_muted;
-                            min-width: 32px;
-                            horizontal-alignment: right;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    // 集中式播放控制列 + 音量列 (消除右上角黑洞，控制邏輯大一統)
-                    HorizontalLayout {
-                        alignment: space-between;
-
-                        // 左側：隨機、上一首、主播放鍵、下一首、循環
-                        HorizontalLayout {
-                            spacing: 6px;
-                            alignment: center;
-
-                            IconButton {
-                                icon: @image-url("icons/shuffle.svg");
-                                icon_size: 15px;
-                                active: root.shuffle_enabled;
-                                active_color: Theme.accent_primary;
-                                default_color: Theme.text_muted;
-                                clicked => { root.toggle_shuffle(); }
-                            }
-
-                            IconButton {
-                                icon: @image-url("icons/prev.svg");
-                                icon_size: 15px;
-                                default_color: Theme.text_primary;
-                                clicked => { root.play_previous(); }
-                            }
-
-                            // 主播放按鈕 (暖金實心膠囊)
-                            Rectangle {
-                                width: 44px;
-                                height: 32px;
-                                border-radius: 8px;
-                                background: play_touch.has-hover ? Theme.accent_primary_hover : Theme.accent_primary;
-                                animate background { duration: 100ms; }
-
-                                Image {
-                                    source: root.is_playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");
-                                    width: 17px;
-                                    height: 17px;
-                                    colorize: Theme.text_dark;
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                }
-
-                                play_touch := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.toggle_play_pause(); }
-                                }
-                            }
-
-                            IconButton {
-                                icon: @image-url("icons/next.svg");
-                                icon_size: 15px;
-                                default_color: Theme.text_primary;
-                                clicked => { root.play_next(); }
-                            }
-
-                            Rectangle {
-                                width: 30px;
-                                height: 30px;
-
-                                IconButton {
-                                    width: 100%;
-                                    height: 100%;
-                                    icon: @image-url("icons/repeat.svg");
-                                    icon_size: 15px;
-                                    active: root.repeat_mode_label != "REPEAT OFF";
-                                    active_color: Theme.accent_primary;
-                                    default_color: Theme.text_muted;
-                                    clicked => { root.cycle_repeat_mode(); }
-                                }
-
-                                if root.repeat_mode_label == "REPEAT ONE": Text {
-                                    x: 19px;
-                                    y: 4px;
-                                    text: "1";
-                                    color: Theme.accent_primary;
-                                    font-size: 8px;
-                                    font-weight: 800;
-                                }
-                            }
-                        }
-
-                        // 右側：音量控制 + 收合清單 Chevron (Mini-Mode 支援)
-                        HorizontalLayout {
-                            spacing: 8px;
-                            alignment: end;
-                            y: (parent.height - self.height) / 2;
-                            height: 28px;
-
-                            // 音量控制子群組 (喇叭 + 滑桿 + 百分比)
-                            HorizontalLayout {
-                                spacing: 6px;
-                                alignment: center;
-                                y: (parent.height - self.height) / 2;
-                                height: 26px;
-
-                                IconButton {
-                                    width: 26px;
-                                    height: 26px;
-                                    icon: root.is_muted ? @image-url("icons/volume-mute.svg") : @image-url("icons/volume.svg");
-                                    icon_size: 15px;
-                                    active: root.is_muted;
-                                    active_color: Theme.accent_gold;
-                                    default_color: Theme.text_secondary;
-                                    clicked => { root.toggle_mute(); }
-                                }
-
-                                InteractiveVolumeBar {
-                                    width: 75px;
-                                    height: 20px;
-                                    y: (parent.height - self.height) / 2;
-                                    volume <=> root.volume_ratio;
-                                    user_volume(v) => { root.on_user_volume(v); }
-                                }
-
-                                Text {
-                                    text: Math.round(root.volume_ratio * 100.0) + "%";
-                                    font-size: 10px;
-                                    color: Theme.text_muted;
-                                    width: 32px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-
-                            // 呼吸間隔微留白
-                            Rectangle {
-                                width: 2px;
-                            }
-
-                            // 收合/展開下方清單按鈕 (Mini-Mode 切換器，自動 180° 翻轉動畫)
-                            Rectangle {
-                                width: 28px;
-                                height: 28px;
-                                y: (parent.height - self.height) / 2;
-                                border-radius: 6px;
-                                background: chevron_touch.has-hover ? Theme.surface_hover : transparent;
-                                animate background { duration: 100ms; }
-
-                                Image {
-                                    source: @image-url("icons/chevron-down.svg");
-                                    width: 15px;
-                                    height: 15px;
-                                    colorize: root.queue_expanded ? Theme.accent_primary : Theme.text_muted;
-                                    transform-rotation: root.queue_expanded ? 180deg : 0deg;
-                                    animate transform-rotation { duration: 200ms; easing: ease-in-out; }
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                }
-
-                                chevron_touch := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.toggle_queue(); }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // ==========================================
-        // 3. 頁籤導覽列與播放清單抽屜 (可動態收合)
-        // ==========================================
-        if root.queue_expanded: Rectangle {
-            vertical-stretch: 1;
-            background: Theme.panel_bg;
-            clip: true;
-
-            TouchArea {
-                clicked => { search_input.clear-focus(); }
-            }
-
-            VerticalLayout {
-                padding-top: 6px;
-                padding-bottom: 8px;
-                padding-left: 10px;
-                padding-right: 10px;
-                spacing: 6px;
-
-                // 膠囊切換 Tabs
-                HorizontalLayout {
-                    height: 28px;
-                    spacing: 6px;
-                    alignment: start;
-
-                    for tab[index] in ["SEARCH", "QUEUE", "SAVED", "HISTORY"]: Rectangle {
-                        width: 72px;
-                        height: 26px;
-                        border-radius: 6px;
-                        background: root.panel_tab == tab ? Theme.accent_primary : (tab_touch.has-hover ? Theme.surface_hover : Theme.surface);
-                        animate background { duration: 120ms; }
-
-                        Text {
-                            text: tab;
-                            color: root.panel_tab == tab ? Theme.text_dark : Theme.text_primary;
-                            font-size: 10.5px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            width: 100%;
-                            height: 100%;
-                        }
-
-                        tab_touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.select_panel_tab(tab); }
-                        }
-                    }
-
-                    Rectangle { horizontal-stretch: 1; }
-
-                    // 清空待播清單按鈕
-                    if root.panel_tab == "QUEUE" && root.queue_items.length > 0: IconButton {
-                        width: 26px;
-                        height: 26px;
-                        icon: @image-url("icons/trash.svg");
-                        icon_size: 14px;
-                        default_color: Theme.accent_danger;
-                        hover_color: #E09E8A;
-                        clicked => { root.clear_queue(); }
-                    }
-                }
-
-                if root.panel_message != "": Text {
-                    text: root.panel_message;
-                    color: Theme.accent_gold;
-                    font-size: 10px;
-                    height: 14px;
-                    overflow: elide;
-                }
-
-                // --- 搜尋結果清單 ---
-                if root.panel_tab == "SEARCH" && root.search_results.length > 0: ListView {
-                    vertical-stretch: 1;
-                    for item[index] in root.search_results: TrackItemView {
-                        item: item;
-                        index: index;
-                        mode: "SEARCH";
-                        play => { root.play_search_result(item.key); }
-                        enqueue => { root.enqueue_search_result(item.key); }
-                        toggle_fav => { root.toggle_search_favorite(item.key); }
-                    }
-                }
-
-                if root.panel_tab == "SEARCH" && root.search_results.length == 0: Text {
-                    text: "Search for a song or paste a YouTube link.";
-                    color: Theme.text_secondary;
-                    font-size: 11.5px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    vertical-stretch: 1;
-                }
-
-                // --- 待播佇列清單 ---
-                if root.panel_tab == "QUEUE" && root.queue_items.length > 0: ListView {
-                    vertical-stretch: 1;
-                    for item[index] in root.queue_items: TrackItemView {
-                        item: item;
-                        index: index;
-                        mode: "QUEUE";
-                        play => { root.play_queue_item(index); }
-                        remove => { root.remove_queue_item(index); }
-                    }
-                }
-
-                if root.panel_tab == "QUEUE" && root.queue_items.length == 0: Text {
-                    text: "Queue is empty · add songs from Search.";
-                    color: Theme.text_secondary;
-                    font-size: 11.5px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    vertical-stretch: 1;
-                }
-
-                // --- 我的最愛清單 ---
-                if root.panel_tab == "SAVED" && root.favorite_items.length > 0: ListView {
-                    vertical-stretch: 1;
-                    for item[index] in root.favorite_items: TrackItemView {
-                        item: item;
-                        index: index;
-                        mode: "SAVED";
-                        play => { root.play_favorite(item.key); }
-                        remove => { root.remove_favorite(item.key); }
-                    }
-                }
-
-                if root.panel_tab == "SAVED" && root.favorite_items.length == 0: Text {
-                    text: "No favorites saved yet.";
-                    color: Theme.text_secondary;
-                    font-size: 11.5px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    vertical-stretch: 1;
-                }
-
-                // --- 歷史紀錄清單 ---
-                if root.panel_tab == "HISTORY" && root.history_items.length > 0: ListView {
-                    vertical-stretch: 1;
-                    for item[index] in root.history_items: TrackItemView {
-                        item: item;
-                        index: index;
-                        mode: "HISTORY";
-                        play => { root.play_history(item.key); }
-                        toggle_fav => { root.favorite_history(item.key); }
-                    }
-                }
-
-                if root.panel_tab == "HISTORY" && root.history_items.length == 0: Text {
-                    text: "No recently played tracks yet.";
-                    color: Theme.text_secondary;
-                    font-size: 11.5px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    vertical-stretch: 1;
-                }
+            border-color: Theme.accent_primary;
+
+            tooltip_txt := Text {
+                text: TooltipState.text;
+                font-size: 10px;
+                color: Theme.text_primary;
+                horizontal-alignment: center;
+                vertical-alignment: center;
             }
         }
     }

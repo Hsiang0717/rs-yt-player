@@ -1,0 +1,506 @@
+import { Theme, TooltipState } from "../theme.slint";
+import { InteractiveProgressBar } from "../components/progress_bar.slint";
+import { InteractiveVolumeBar } from "../components/volume_bar.slint";
+import { LoadingSpinner } from "../components/loading_spinner.slint";
+import { IconButton } from "../components/icon_button.slint";
+
+export component PlayerDeckView inherits Rectangle {
+    in property <string> track_title: "Ready to Play";
+    in property <string> track_artist: "Enter a search query, playlist, or YouTube URL";
+    in property <string> time_current: "00:00";
+    in property <string> time_total: "00:00";
+    in property <string> track_status: "READY";
+    in property <string> track_badge: "AAC";
+    in property <bool> is_playing: false;
+    in property <bool> is_loading: false;
+    in property <image> cover_image;
+    in property <bool> has_cover: false;
+    in-out property <float> progress_ratio: 0.0;
+    in-out property <float> buffer_ratio: 0.0;
+    in-out property <bool> is_scrubbing: false;
+    in property <bool> has_active_track: false;
+    in-out property <float> volume_ratio: 1.0;
+    in property <bool> is_muted: false;
+    in property <bool> queue_expanded: false;
+    in property <bool> shuffle_enabled: false;
+    in property <string> repeat_mode_label: "REPEAT OFF";
+    in property <bool> autoplay_enabled: true;
+    in property <string> sleep_timer_label: "";
+    in property <bool> can_retry: false;
+    in property <string> current_track_key: "";
+    in property <bool> current_is_favorite: false;
+
+    callback background_clicked();
+    callback cancel_loading();
+    callback retry_playback();
+    callback toggle_current_favorite();
+    callback toggle_autoplay();
+    callback cycle_sleep_timer();
+    callback on_user_scrub(float);
+    callback on_user_seek(float);
+    callback toggle_shuffle();
+    callback play_previous();
+    callback toggle_play_pause();
+    callback play_next();
+    callback cycle_repeat_mode();
+    callback toggle_mute();
+    callback on_user_volume(float);
+    callback toggle_queue();
+
+    height: 143px;
+    background: Theme.bg;
+
+    TouchArea {
+        clicked => { root.background_clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 14px;
+
+        // 1. Album Cover Art
+        Rectangle {
+            width: 108px;
+            height: 108px;
+            border-radius: 8px;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.border;
+            clip: true;
+
+            if !root.has_cover: Rectangle {
+                width: 100%;
+                height: 100%;
+                background: Theme.panel_bg;
+
+                Image {
+                    source: @image-url("../icons/music-note.svg");
+                    width: 36px;
+                    height: 36px;
+                    colorize: Theme.accent_primary;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+
+            if root.has_cover: Image {
+                source: root.cover_image;
+                image-fit: cover;
+                width: 100%;
+                height: 100%;
+            }
+        }
+
+        // 2. Right Info Deck: Metadata + Progress Bar + Transport Controls
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: space-between;
+
+            // Title, Artist & Badges
+            HorizontalLayout {
+                alignment: space-between;
+                spacing: 8px;
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 3px;
+                    alignment: center;
+
+                    Text {
+                        text: root.track_title;
+                        font-size: 14px;
+                        font-weight: 700;
+                        color: Theme.text_primary;
+                        overflow: elide;
+                        horizontal-alignment: left;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+
+                        Text {
+                            text: root.track_artist;
+                            font-size: 11px;
+                            color: Theme.text_secondary;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                            horizontal-alignment: left;
+                        }
+
+                        if root.is_loading: LoadingSpinner {
+                            loading: root.is_loading;
+                        }
+
+                        Text {
+                            text: root.track_status;
+                            font-size: 10px;
+                            font-weight: 600;
+                            color: root.track_status == "ERROR" ? Theme.accent_danger : (root.is_loading || root.track_status == "BUFFERING" || root.track_status == "SEARCHING" ? Theme.accent_gold : (root.is_playing ? Theme.accent_primary : Theme.text_muted));
+                        }
+                    }
+                }
+
+                // Right Badges & Quick Actions
+                HorizontalLayout {
+                    spacing: 5px;
+                    alignment: start;
+
+                    // Autoplay Toggle Badge
+                    Rectangle {
+                        height: 22px;
+                        border-radius: 4px;
+                        background: root.autoplay_enabled ? Theme.surface_active : Theme.surface;
+                        border-width: 1px;
+                        border-color: root.autoplay_enabled ? Theme.accent_primary : Theme.border;
+
+                        HorizontalLayout {
+                            padding-left: 5px;
+                            padding-right: 5px;
+                            alignment: center;
+
+                            Text {
+                                text: "AUTO";
+                                font-size: 9px;
+                                font-weight: 700;
+                                color: root.autoplay_enabled ? Theme.accent_primary : Theme.text_muted;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle_autoplay(); }
+                            changed has-hover => {
+                                if (self.has-hover) {
+                                    TooltipState.text = root.autoplay_enabled ? "Autoplay Recommendations: ON" : "Autoplay Recommendations: OFF";
+                                } else {
+                                    TooltipState.text = "";
+                                }
+                            }
+                        }
+                    }
+
+                    // Sleep Timer Badge
+                    Rectangle {
+                        height: 22px;
+                        border-radius: 4px;
+                        background: root.sleep_timer_label != "" ? Theme.surface_active : Theme.surface;
+                        border-width: 1px;
+                        border-color: root.sleep_timer_label != "" ? Theme.accent_gold : Theme.border;
+
+                        HorizontalLayout {
+                            padding-left: 5px;
+                            padding-right: 5px;
+                            spacing: 3px;
+                            alignment: center;
+
+                            Image {
+                                source: @image-url("../icons/clock.svg");
+                                width: 11px;
+                                height: 11px;
+                                colorize: root.sleep_timer_label != "" ? Theme.accent_gold : Theme.text_muted;
+                                y: (parent.height - self.height) / 2;
+                            }
+
+                            if root.sleep_timer_label != "": Text {
+                                text: root.sleep_timer_label;
+                                font-size: 9px;
+                                font-weight: 700;
+                                color: Theme.accent_gold;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.cycle_sleep_timer(); }
+                            changed has-hover => {
+                                if (self.has-hover) {
+                                    TooltipState.text = root.sleep_timer_label != "" ? ("Sleep Timer: " + root.sleep_timer_label + " (Click to cycle)") : "Sleep Timer: OFF (Click for 15m / 30m / 60m / EOT)";
+                                } else {
+                                    TooltipState.text = "";
+                                }
+                            }
+                        }
+                    }
+
+                    // Codec Badge (AAC / OPUS)
+                    Rectangle {
+                        height: 22px;
+                        border-radius: 4px;
+                        background: Theme.surface;
+                        border-width: 1px;
+                        border-color: Theme.border;
+
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            alignment: center;
+
+                            Text {
+                                text: root.track_badge;
+                                font-size: 9.5px;
+                                font-weight: 700;
+                                color: Theme.accent_primary;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            changed has-hover => {
+                                if (self.has-hover) {
+                                    TooltipState.text = "Native Audio Stream Format (" + root.track_badge + ")";
+                                } else {
+                                    TooltipState.text = "";
+                                }
+                            }
+                        }
+                    }
+
+                    if root.is_loading: IconButton {
+                        width: 22px;
+                        height: 22px;
+                        icon: @image-url("../icons/close.svg");
+                        icon_size: 11px;
+                        default_color: Theme.accent_danger;
+                        hover_color: #E09E8A;
+                        tooltip: "Cancel Loading";
+                        clicked => { root.cancel_loading(); }
+                    }
+
+                    if root.can_retry: IconButton {
+                        width: 22px;
+                        height: 22px;
+                        icon: @image-url("../icons/repeat.svg");
+                        icon_size: 12px;
+                        default_color: Theme.accent_primary;
+                        hover_color: Theme.accent_primary_hover;
+                        tooltip: "Retry Track";
+                        clicked => { root.retry_playback(); }
+                    }
+
+                    if root.current_track_key != "": IconButton {
+                        width: 24px;
+                        height: 22px;
+                        icon: root.current_is_favorite ? @image-url("../icons/heart-filled.svg") : @image-url("../icons/heart.svg");
+                        icon_size: 14px;
+                        active: root.current_is_favorite;
+                        active_color: Theme.accent_gold;
+                        default_color: Theme.text_secondary;
+                        tooltip: root.current_is_favorite ? "Remove from Saved" : "Save to Favorites";
+                        clicked => { root.toggle_current_favorite(); }
+                    }
+                }
+            }
+
+            // Dual-sided Progress Bar (Supports HH:MM:SS without overflow)
+            HorizontalLayout {
+                spacing: 8px;
+
+                Text {
+                    text: root.time_current;
+                    font-size: 10.5px;
+                    color: Theme.text_muted;
+                    min-width: root.time_total.character-count > 5 || root.time_current.character-count > 5 ? 48px : 34px;
+                    horizontal-alignment: left;
+                    vertical-alignment: center;
+                }
+
+                InteractiveProgressBar {
+                    horizontal-stretch: 1;
+                    ratio <=> root.progress_ratio;
+                    buffer_ratio <=> root.buffer_ratio;
+                    is_scrubbing <=> root.is_scrubbing;
+                    enabled: root.has_active_track;
+                    user_scrub(r) => { root.on_user_scrub(r); }
+                    user_seek(r) => { root.on_user_seek(r); }
+                }
+
+                Text {
+                    text: root.time_total;
+                    font-size: 10.5px;
+                    color: Theme.text_muted;
+                    min-width: root.time_total.character-count > 5 || root.time_current.character-count > 5 ? 48px : 34px;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Transport Controls + Volume + Drawer Toggle
+            HorizontalLayout {
+                alignment: space-between;
+
+                // Left: Shuffle, Previous, Play/Pause, Next, Repeat
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: center;
+
+                    IconButton {
+                        icon: @image-url("../icons/shuffle.svg");
+                        icon_size: 15px;
+                        active: root.shuffle_enabled;
+                        active_color: Theme.accent_primary;
+                        default_color: Theme.text_muted;
+                        tooltip: root.shuffle_enabled ? "Shuffle: ON" : "Shuffle: OFF";
+                        clicked => { root.toggle_shuffle(); }
+                    }
+
+                    IconButton {
+                        icon: @image-url("../icons/prev.svg");
+                        icon_size: 15px;
+                        default_color: Theme.text_primary;
+                        tooltip: "Previous / Restart Track";
+                        clicked => { root.play_previous(); }
+                    }
+
+                    Rectangle {
+                        width: 44px;
+                        height: 32px;
+                        border-radius: 8px;
+                        background: play_touch.has-hover ? Theme.accent_primary_hover : Theme.accent_primary;
+                        animate background { duration: 100ms; }
+
+                        Image {
+                            source: root.is_playing ? @image-url("../icons/pause.svg") : @image-url("../icons/play.svg");
+                            width: 17px;
+                            height: 17px;
+                            colorize: Theme.text_dark;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+
+                        play_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle_play_pause(); }
+                            changed has-hover => {
+                                if (self.has-hover) {
+                                    TooltipState.text = root.is_playing ? "Pause (Space)" : "Play (Space)";
+                                } else {
+                                    TooltipState.text = "";
+                                }
+                            }
+                        }
+                    }
+
+                    IconButton {
+                        icon: @image-url("../icons/next.svg");
+                        icon_size: 15px;
+                        default_color: Theme.text_primary;
+                        tooltip: "Next Track";
+                        clicked => { root.play_next(); }
+                    }
+
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+
+                        IconButton {
+                            width: 100%;
+                            height: 100%;
+                            icon: @image-url("../icons/repeat.svg");
+                            icon_size: 15px;
+                            active: root.repeat_mode_label != "REPEAT OFF";
+                            active_color: Theme.accent_primary;
+                            default_color: Theme.text_muted;
+                            tooltip: root.repeat_mode_label;
+                            clicked => { root.cycle_repeat_mode(); }
+                        }
+
+                        if root.repeat_mode_label == "REPEAT ONE": Text {
+                            x: 19px;
+                            y: 4px;
+                            text: "1";
+                            color: Theme.accent_primary;
+                            font-size: 8px;
+                            font-weight: 800;
+                        }
+                    }
+                }
+
+                // Right: Volume Controls + Queue Drawer Toggle
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    y: (parent.height - self.height) / 2;
+                    height: 28px;
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: center;
+                        y: (parent.height - self.height) / 2;
+                        height: 26px;
+
+                        IconButton {
+                            width: 26px;
+                            height: 26px;
+                            icon: root.is_muted ? @image-url("../icons/volume-mute.svg") : @image-url("../icons/volume.svg");
+                            icon_size: 15px;
+                            active: root.is_muted;
+                            active_color: Theme.accent_gold;
+                            default_color: Theme.text_secondary;
+                            tooltip: root.is_muted ? "Unmute (M)" : "Mute (M)";
+                            clicked => { root.toggle_mute(); }
+                        }
+
+                        InteractiveVolumeBar {
+                            width: 75px;
+                            height: 20px;
+                            y: (parent.height - self.height) / 2;
+                            volume <=> root.volume_ratio;
+                            user_volume(v) => { root.on_user_volume(v); }
+                        }
+
+                        Text {
+                            text: Math.round(root.volume_ratio * 100.0) + "%";
+                            font-size: 10px;
+                            color: Theme.text_muted;
+                            width: 32px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Rectangle {
+                        width: 2px;
+                    }
+
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 6px;
+                        background: chevron_touch.has-hover ? Theme.surface_hover : transparent;
+                        animate background { duration: 100ms; }
+
+                        Image {
+                            source: @image-url("../icons/chevron-down.svg");
+                            width: 15px;
+                            height: 15px;
+                            colorize: root.queue_expanded ? Theme.accent_primary : Theme.text_muted;
+                            transform-rotation: root.queue_expanded ? 180deg : 0deg;
+                            animate transform-rotation { duration: 200ms; easing: ease-in-out; }
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+
+                        chevron_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle_queue(); }
+                            changed has-hover => {
+                                if (self.has-hover) {
+                                    TooltipState.text = root.queue_expanded ? "Collapse Playlist Drawer" : "Expand Playlist Drawer";
+                                } else {
+                                    TooltipState.text = "";
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

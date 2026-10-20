@@ -1,15 +1,15 @@
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use crate::AppWindow;
 use crate::extractor::Extractor;
 use crate::library::{LibraryStore, TrackRecord};
 use crate::playback_coordinator::{
-    start_track_playback, trigger_next, trigger_previous, trigger_toggle_play_pause,
-    LoadingAbortHandle, SmtcHandle,
+    LoadingAbortHandle, SmtcHandle, start_track_playback, trigger_next, trigger_previous,
+    trigger_toggle_play_pause,
 };
 use crate::player::AudioPlayer;
 use crate::queue::PlayQueue;
-use crate::AppWindow;
 use slint::ComponentHandle;
 
 pub mod library;
@@ -17,6 +17,58 @@ pub mod playback;
 pub mod queue;
 pub mod search;
 pub mod window;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub enum SleepTimerMode {
+    #[default]
+    Off,
+    Minutes {
+         preset_mins: u32,
+         deadline: Instant,
+    },
+    EndOfTrack,
+}
+
+impl SleepTimerMode {
+    pub fn cycle_next(self) -> Self {
+        let now = Instant::now();
+        match self {
+            Self::Off => Self::Minutes {
+                preset_mins: 15,
+                deadline: now + Duration::from_secs(15 * 60),
+            },
+            Self::Minutes {
+                preset_mins: 15, ..
+            } => Self::Minutes {
+                preset_mins: 30,
+                deadline: now + Duration::from_secs(30 * 60),
+            },
+            Self::Minutes {
+                preset_mins: 30, ..
+            } => Self::Minutes {
+                preset_mins: 60,
+                deadline: now + Duration::from_secs(60 * 60),
+            },
+            Self::Minutes { .. } => Self::EndOfTrack,
+            Self::EndOfTrack => Self::Off,
+        }
+    }
+
+    pub fn badge_label(self) -> String {
+        match self {
+            Self::Off => String::new(),
+            Self::Minutes { deadline, .. } => {
+                let rem = deadline.saturating_duration_since(Instant::now()).as_secs();
+                if rem >= 60 {
+                    format!("{}M", rem.div_ceil(60))
+                } else {
+                    format!("{}S", rem)
+                }
+            }
+            Self::EndOfTrack => "EOT".to_string(),
+        }
+    }
+}
 
 pub struct PendingSeekState {
     pub id: u64,
@@ -27,7 +79,6 @@ pub struct PendingSeekState {
     pub requested_at: Instant,
 }
 
-/// Shared playback dependency bundle to eliminate repetitive Arc/handle cloning.
 #[derive(Clone)]
 pub(crate) struct PlaybackContext {
     pub(crate) player: Arc<AudioPlayer>,
@@ -41,7 +92,7 @@ pub(crate) struct PlaybackContext {
 }
 
 impl PlaybackContext {
-    pub(crate) fn start_track(&self, key: String, force_reextract: bool) {
+    pub(crate) fn start_track(&self, key: String, starts_new_cycle: bool) {
         start_track_playback(
             key,
             Arc::clone(&self.extractor),
@@ -51,7 +102,7 @@ impl PlaybackContext {
             self.queue.clone(),
             self.library.clone(),
             Arc::clone(&self.last_query),
-            force_reextract,
+            starts_new_cycle,
             self.loading_abort.clone(),
         );
     }
@@ -63,6 +114,9 @@ impl PlaybackContext {
             self.smtc.clone(),
             self.ui_weak.clone(),
             Arc::clone(&self.last_query),
+            self.queue.clone(),
+            self.library.clone(),
+            self.loading_abort.clone(),
         );
     }
 
@@ -111,6 +165,7 @@ pub fn register_ui_callbacks(
     main_hwnd: Arc<Mutex<Option<windows::Win32::Foundation::HWND>>>,
     seek_seq: Arc<std::sync::atomic::AtomicU64>,
     seek_lock: Arc<tokio::sync::Mutex<()>>,
+    sleep_timer: Arc<Mutex<SleepTimerMode>>,
 ) {
     let ctx = PlaybackContext {
         player: Arc::clone(&player),
@@ -123,11 +178,24 @@ pub fn register_ui_callbacks(
         ui_weak: app.as_weak(),
     };
 
-    window::bind_window_controls(app, main_hwnd);
-    window::bind_navigation_controls(app, play_queue, library);
+    window::bind_window_controls(app, main_hwnd, library.clone());
+    window::bind_navigation_controls(app, play_queue, library.clone());
     search::bind_search_controls(app, ctx.clone(), Arc::clone(&search_records));
     library::bind_library_controls(app, ctx.clone(), search_records);
-    queue::bind_queue_controls(app, ctx.clone(), Arc::clone(&is_auto_advancing));
+    queue::bind_queue_controls(
+        app,
+        ctx.clone(),
+        Arc::clone(&is_auto_advancing),
+        sleep_timer,
+    );
     playback::bind_playback_controls(app, ctx, is_auto_advancing);
-    playback::bind_seek_and_volume_controls(app, player, smtc, pending_seek, seek_seq, seek_lock);
+    playback::bind_seek_and_volume_controls(
+        app,
+        player,
+        smtc,
+        library,
+        pending_seek,
+        seek_seq,
+        seek_lock,
+    );
 }

@@ -1,0 +1,207 @@
+import { Theme, TooltipState } from "../theme.slint";
+import { IconButton } from "../components/icon_button.slint";
+
+export component TitleBarView inherits Rectangle {
+    in-out property <string> search_query: "";
+    in property <bool> always_on_top: false;
+
+    callback start_window_drag();
+    callback search_accepted(string);
+    callback toggle_always_on_top();
+    callback minimize_window();
+    callback close_window();
+    callback focus_returned();
+
+    public function focus_search() {
+        search_input.focus();
+    }
+
+    public function clear_search_focus() {
+        search_input.clear-focus();
+        root.focus_returned();
+    }
+
+    public function has_search_focus() -> bool {
+        return search_input.has-focus;
+    }
+
+    height: 42px;
+    background: Theme.bg;
+    border-width: 1px;
+    border-color: Theme.border_subtle;
+
+    TouchArea {
+        moved => { root.start_window_drag(); }
+        clicked => { root.clear_search_focus(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 10px;
+
+        // 1. App Identity Brand (Unified Title)
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+            y: (parent.height - self.height) / 2;
+            height: 20px;
+            horizontal-stretch: 0;
+            min-width: 142px;
+
+            Image {
+                source: @image-url("../icons/music-note.svg");
+                width: 14px;
+                height: 14px;
+                colorize: Theme.accent_primary;
+                y: (parent.height - self.height) / 2;
+            }
+
+            Text {
+                text: "YouTube Audio Player";
+                color: Theme.accent_primary;
+                font-weight: 700;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+        }
+
+        // 2. Integrated Search Capsule
+        Rectangle {
+            horizontal-stretch: 1;
+            min-width: 180px;
+            max-width: 310px;
+            height: 30px;
+            y: (parent.height - self.height) / 2;
+            background: Theme.surface;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: search_input.has-focus ? Theme.accent_primary : Theme.border_subtle;
+            animate border-color { duration: 100ms; }
+            clip: true;
+
+            TouchArea {
+                clicked => {
+                    search_input.focus();
+                }
+            }
+
+            HorizontalLayout {
+                width: 100%;
+                height: 100%;
+                padding-left: 10px;
+                padding-right: 8px;
+                spacing: 8px;
+
+                Image {
+                    source: @image-url("../icons/search.svg");
+                    width: 14px;
+                    height: 14px;
+                    colorize: search_input.has-focus ? Theme.accent_primary : Theme.text_muted;
+                    y: (parent.height - self.height) / 2;
+                    animate colorize { duration: 100ms; }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    clip: true;
+
+                    search_input := TextInput {
+                        width: 100%;
+                        height: 100%;
+                        single-line: true;
+                        text <=> root.search_query;
+                        font-size: 11.5px;
+                        color: Theme.text_primary;
+                        vertical-alignment: center;
+                        accepted => {
+                            if (self.text != "") {
+                                root.search_accepted(self.text);
+                            }
+                            self.clear-focus();
+                            root.focus_returned();
+                        }
+                        key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                self.clear-focus();
+                                root.focus_returned();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                    }
+
+                    if root.search_query == "": Text {
+                        width: 100%;
+                        text: "Search song, playlist, or paste URL... (Ctrl+F)";
+                        font-size: 11px;
+                        color: Theme.text_muted;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                if root.search_query != "": IconButton {
+                    width: 20px;
+                    height: 20px;
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../icons/close.svg");
+                    icon_size: 11px;
+                    default_color: Theme.text_muted;
+                    hover_color: Theme.text_primary;
+                    tooltip: "Clear Search";
+                    clicked => {
+                        root.search_query = "";
+                        search_input.focus();
+                    }
+                }
+            }
+        }
+
+        // 3. Window Control Buttons (Pin / Minimize / Close)
+        HorizontalLayout {
+            spacing: 3px;
+            alignment: end;
+            y: (parent.height - self.height) / 2;
+            height: 28px;
+            horizontal-stretch: 0;
+            min-width: 88px;
+
+            IconButton {
+                width: 28px;
+                height: 28px;
+                icon: @image-url("../icons/pin.svg");
+                icon_size: 13px;
+                active: root.always_on_top;
+                active_color: Theme.accent_primary;
+                default_color: Theme.text_secondary;
+                hover_color: Theme.text_primary;
+                tooltip: root.always_on_top ? "Unpin Always on Top" : "Pin Always on Top";
+                clicked => { root.toggle_always_on_top(); }
+            }
+
+            IconButton {
+                width: 28px;
+                height: 28px;
+                icon: @image-url("../icons/minimize.svg");
+                icon_size: 13px;
+                default_color: Theme.text_secondary;
+                hover_color: Theme.text_primary;
+                tooltip: "Minimize to System Tray";
+                clicked => { root.minimize_window(); }
+            }
+
+            IconButton {
+                width: 28px;
+                height: 28px;
+                icon: @image-url("../icons/close.svg");
+                icon_size: 13px;
+                default_color: Theme.text_secondary;
+                hover_color: Theme.accent_danger;
+                tooltip: "Quit Application";
+                clicked => { root.close_window(); }
+            }
+        }
+    }
+}

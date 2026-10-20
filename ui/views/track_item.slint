@@ -5,12 +5,16 @@ import { IconButton } from "../components/icon_button.slint";
 export component TrackItemView inherits Rectangle {
     in property <TrackRow> item;
     in property <int> index: 0;
+    in property <int> total_count: 1;
     in property <string> mode: "SEARCH"; // "SEARCH", "QUEUE", "SAVED", "HISTORY"
 
     callback play();
+    callback play_next();
     callback enqueue();
     callback toggle_fav();
     callback remove();
+    callback move_up();
+    callback move_down();
 
     height: 44px;
     background: root.item.is_current ? Theme.surface_active : (item_touch.has-hover ? Theme.surface_hover : (Math.mod(root.index, 2) == 0 ? Theme.surface : Theme.surface_alt));
@@ -99,13 +103,13 @@ export component TrackItemView inherits Rectangle {
             }
         }
 
-        // 3. 右側固定時長 (等寬靠右)
+        // 3. 右側固定時長 (支援 HH:MM:SS 長音訊格式不溢位)
         Text {
             text: root.item.duration;
             color: Theme.text_muted;
             font-size: 11px;
             vertical-alignment: center;
-            min-width: 44px;
+            min-width: 52px;
             horizontal-alignment: right;
         }
 
@@ -115,23 +119,36 @@ export component TrackItemView inherits Rectangle {
             alignment: center;
 
             IconButton {
-                width: 26px;
-                height: 26px;
+                width: 24px;
+                height: 24px;
+                icon: @image-url("../icons/play-next.svg");
+                icon_size: 13px;
+                default_color: Theme.text_secondary;
+                hover_color: Theme.accent_primary;
+                tooltip: "Play Next";
+                clicked => { root.play_next(); }
+            }
+
+            IconButton {
+                width: 24px;
+                height: 24px;
                 icon: @image-url("../icons/plus.svg");
-                icon_size: 14px;
+                icon_size: 13px;
                 default_color: Theme.accent_primary;
                 hover_color: Theme.accent_primary_hover;
+                tooltip: "Add to Queue";
                 clicked => { root.enqueue(); }
             }
 
             IconButton {
-                width: 26px;
-                height: 26px;
+                width: 24px;
+                height: 24px;
                 icon: root.item.is_favorite ? @image-url("../icons/heart-filled.svg") : @image-url("../icons/heart.svg");
-                icon_size: 14px;
+                icon_size: 13px;
                 active: root.item.is_favorite;
                 active_color: Theme.accent_gold;
                 default_color: Theme.text_secondary;
+                tooltip: root.item.is_favorite ? "Remove Favorite" : "Save to Favorites";
                 clicked => { root.toggle_fav(); }
             }
         }
@@ -141,13 +158,36 @@ export component TrackItemView inherits Rectangle {
             alignment: center;
 
             IconButton {
-                width: 26px;
-                height: 26px;
+                width: 24px;
+                height: 24px;
+                icon: @image-url("../icons/play-next.svg");
+                icon_size: 13px;
+                default_color: Theme.text_secondary;
+                hover_color: Theme.accent_primary;
+                tooltip: "Play Next";
+                clicked => { root.play_next(); }
+            }
+
+            IconButton {
+                width: 24px;
+                height: 24px;
+                icon: @image-url("../icons/plus.svg");
+                icon_size: 13px;
+                default_color: Theme.accent_primary;
+                hover_color: Theme.accent_primary_hover;
+                tooltip: "Add to Queue";
+                clicked => { root.enqueue(); }
+            }
+
+            IconButton {
+                width: 24px;
+                height: 24px;
                 icon: root.item.is_favorite ? @image-url("../icons/heart-filled.svg") : @image-url("../icons/heart.svg");
-                icon_size: 14px;
+                icon_size: 13px;
                 active: root.item.is_favorite;
                 active_color: Theme.accent_gold;
                 default_color: Theme.text_secondary;
+                tooltip: root.item.is_favorite ? "Remove Favorite" : "Save to Favorites";
                 clicked => { root.toggle_fav(); }
             }
         }
@@ -157,27 +197,75 @@ export component TrackItemView inherits Rectangle {
             alignment: center;
 
             IconButton {
-                width: 26px;
-                height: 26px;
+                width: 24px;
+                height: 24px;
+                icon: @image-url("../icons/play-next.svg");
+                icon_size: 13px;
+                default_color: Theme.text_secondary;
+                hover_color: Theme.accent_primary;
+                tooltip: "Play Next";
+                clicked => { root.play_next(); }
+            }
+
+            IconButton {
+                width: 24px;
+                height: 24px;
+                icon: @image-url("../icons/plus.svg");
+                icon_size: 13px;
+                default_color: Theme.accent_primary;
+                hover_color: Theme.accent_primary_hover;
+                tooltip: "Add to Queue";
+                clicked => { root.enqueue(); }
+            }
+
+            IconButton {
+                width: 24px;
+                height: 24px;
                 icon: @image-url("../icons/close.svg");
-                icon_size: 14px;
+                icon_size: 13px;
                 default_color: Theme.accent_gold;
                 hover_color: Theme.accent_gold_hover;
+                tooltip: "Remove from Saved";
                 clicked => { root.remove(); }
             }
         }
 
         if root.mode == "QUEUE": HorizontalLayout {
-            spacing: 4px;
+            spacing: 2px;
             alignment: center;
 
             IconButton {
-                width: 26px;
-                height: 26px;
+                width: 22px;
+                height: 24px;
+                icon: @image-url("../icons/chevron-up.svg");
+                icon_size: 13px;
+                enabled: root.index > 0;
+                default_color: Theme.text_secondary;
+                hover_color: Theme.accent_primary;
+                tooltip: "Move Up";
+                clicked => { root.move_up(); }
+            }
+
+            IconButton {
+                width: 22px;
+                height: 24px;
+                icon: @image-url("../icons/chevron-down.svg");
+                icon_size: 13px;
+                enabled: root.index + 1 < root.total_count;
+                default_color: Theme.text_secondary;
+                hover_color: Theme.accent_primary;
+                tooltip: "Move Down";
+                clicked => { root.move_down(); }
+            }
+
+            IconButton {
+                width: 24px;
+                height: 24px;
                 icon: @image-url("../icons/close.svg");
-                icon_size: 14px;
+                icon_size: 13px;
                 default_color: Theme.accent_danger;
                 hover_color: #E09E8A;
+                tooltip: "Remove from Queue";
                 clicked => { root.remove(); }
             }
         }

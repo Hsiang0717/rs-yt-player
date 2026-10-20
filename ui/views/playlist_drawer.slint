@@ -1,0 +1,262 @@
+import { ListView } from "std-widgets.slint";
+import { Theme, TooltipState } from "../theme.slint";
+import { TrackRow } from "../models.slint";
+import { IconButton } from "../components/icon_button.slint";
+import { TrackItemView } from "track_item.slint";
+
+export component PlaylistDrawerView inherits Rectangle {
+    in property <string> panel_tab: "QUEUE";
+    in property <string> panel_message: "";
+    in property <[TrackRow]> search_results: [];
+    in property <[TrackRow]> queue_items: [];
+    in property <[TrackRow]> favorite_items: [];
+    in property <[TrackRow]> history_items: [];
+
+    callback background_clicked();
+    callback select_panel_tab(string);
+    callback clear_queue();
+    callback play_all(string);
+    callback enqueue_all(string);
+
+    callback play_search_result(string);
+    callback play_next_track(string);
+    callback enqueue_track(string);
+    callback toggle_search_favorite(string);
+
+    callback play_queue_item(int);
+    callback remove_queue_item(int);
+    callback move_queue_item_up(int);
+    callback move_queue_item_down(int);
+
+    callback play_favorite(string);
+    callback remove_favorite(string);
+
+    callback play_history(string);
+    callback favorite_history(string);
+
+    vertical-stretch: 1;
+    background: Theme.panel_bg;
+    clip: true;
+
+    TouchArea {
+        clicked => { root.background_clicked(); }
+    }
+
+    VerticalLayout {
+        padding-top: 6px;
+        padding-bottom: 8px;
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+
+        // Capsule Navigation Tabs + Batch Action Buttons
+        HorizontalLayout {
+            height: 28px;
+            spacing: 6px;
+            alignment: start;
+
+            for tab[index] in ["SEARCH", "QUEUE", "SAVED", "HISTORY"]: Rectangle {
+                width: 72px;
+                height: 26px;
+                border-radius: 6px;
+                background: root.panel_tab == tab ? Theme.accent_primary : (tab_touch.has-hover ? Theme.surface_hover : Theme.surface);
+                animate background { duration: 120ms; }
+
+                Text {
+                    text: tab;
+                    color: root.panel_tab == tab ? Theme.text_dark : Theme.text_primary;
+                    font-size: 10.5px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: 100%;
+                    height: 100%;
+                }
+
+                tab_touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.select_panel_tab(tab); }
+                }
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            // Batch Actions: Play All & Queue All for SEARCH / SAVED / HISTORY
+            if (root.panel_tab == "SEARCH" && root.search_results.length > 0) ||
+               (root.panel_tab == "SAVED" && root.favorite_items.length > 0) ||
+               (root.panel_tab == "HISTORY" && root.history_items.length > 0): HorizontalLayout {
+                spacing: 5px;
+
+                Rectangle {
+                    width: 64px;
+                    height: 24px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 5px;
+                    background: play_all_touch.has-hover ? Theme.accent_primary_hover : Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.accent_primary;
+
+                    Text {
+                        text: "PLAY ALL";
+                        color: play_all_touch.has-hover ? Theme.text_dark : Theme.accent_primary;
+                        font-size: 9.5px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    play_all_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.play_all(root.panel_tab); }
+                        changed has-hover => {
+                            TooltipState.text = self.has-hover ? "Replace queue and play all tracks in this list" : "";
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: 68px;
+                    height: 24px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 5px;
+                    background: queue_all_touch.has-hover ? Theme.surface_hover : Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.border;
+
+                    Text {
+                        text: "+ QUEUE ALL";
+                        color: Theme.text_primary;
+                        font-size: 9.5px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    queue_all_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.enqueue_all(root.panel_tab); }
+                        changed has-hover => {
+                            TooltipState.text = self.has-hover ? "Append all tracks in this list to upcoming queue" : "";
+                        }
+                    }
+                }
+            }
+
+            // Clear Upcoming Queue Button
+            if root.panel_tab == "QUEUE" && root.queue_items.length > 0: IconButton {
+                width: 26px;
+                height: 26px;
+                icon: @image-url("../icons/trash.svg");
+                icon_size: 14px;
+                default_color: Theme.accent_danger;
+                hover_color: #E09E8A;
+                tooltip: "Clear Upcoming Queue";
+                clicked => { root.clear_queue(); }
+            }
+        }
+
+        if root.panel_message != "": Text {
+            text: root.panel_message;
+            color: Theme.accent_gold;
+            font-size: 10px;
+            height: 14px;
+            overflow: elide;
+        }
+
+        // --- Search Results ---
+        if root.panel_tab == "SEARCH" && root.search_results.length > 0: ListView {
+            vertical-stretch: 1;
+            for item[index] in root.search_results: TrackItemView {
+                item: item;
+                index: index;
+                total_count: root.search_results.length;
+                mode: "SEARCH";
+                play => { root.play_search_result(item.key); }
+                play_next => { root.play_next_track(item.key); }
+                enqueue => { root.enqueue_track(item.key); }
+                toggle_fav => { root.toggle_search_favorite(item.key); }
+            }
+        }
+
+        if root.panel_tab == "SEARCH" && root.search_results.length == 0: Text {
+            text: "Search for a song or paste a YouTube link.";
+            color: Theme.text_secondary;
+            font-size: 11.5px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            vertical-stretch: 1;
+        }
+
+        // --- Upcoming Queue ---
+        if root.panel_tab == "QUEUE" && root.queue_items.length > 0: ListView {
+            vertical-stretch: 1;
+            for item[index] in root.queue_items: TrackItemView {
+                item: item;
+                index: index;
+                total_count: root.queue_items.length;
+                mode: "QUEUE";
+                play => { root.play_queue_item(index); }
+                remove => { root.remove_queue_item(index); }
+                move_up => { root.move_queue_item_up(index); }
+                move_down => { root.move_queue_item_down(index); }
+            }
+        }
+
+        if root.panel_tab == "QUEUE" && root.queue_items.length == 0: Text {
+            text: "Queue is empty · add songs from Search or Saved.";
+            color: Theme.text_secondary;
+            font-size: 11.5px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            vertical-stretch: 1;
+        }
+
+        // --- Favorites (Saved) ---
+        if root.panel_tab == "SAVED" && root.favorite_items.length > 0: ListView {
+            vertical-stretch: 1;
+            for item[index] in root.favorite_items: TrackItemView {
+                item: item;
+                index: index;
+                total_count: root.favorite_items.length;
+                mode: "SAVED";
+                play => { root.play_favorite(item.key); }
+                play_next => { root.play_next_track(item.key); }
+                enqueue => { root.enqueue_track(item.key); }
+                remove => { root.remove_favorite(item.key); }
+            }
+        }
+
+        if root.panel_tab == "SAVED" && root.favorite_items.length == 0: Text {
+            text: "No favorites saved yet.";
+            color: Theme.text_secondary;
+            font-size: 11.5px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            vertical-stretch: 1;
+        }
+
+        // --- Recently Played History ---
+        if root.panel_tab == "HISTORY" && root.history_items.length > 0: ListView {
+            vertical-stretch: 1;
+            for item[index] in root.history_items: TrackItemView {
+                item: item;
+                index: index;
+                total_count: root.history_items.length;
+                mode: "HISTORY";
+                play => { root.play_history(item.key); }
+                play_next => { root.play_next_track(item.key); }
+                enqueue => { root.enqueue_track(item.key); }
+                toggle_fav => { root.favorite_history(item.key); }
+            }
+        }
+
+        if root.panel_tab == "HISTORY" && root.history_items.length == 0: Text {
+            text: "No recently played tracks yet.";
+            color: Theme.text_secondary;
+            font-size: 11.5px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            vertical-stretch: 1;
+        }
+    }
+}

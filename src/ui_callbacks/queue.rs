@@ -1,15 +1,16 @@
 use std::sync::{Arc, Mutex};
 
+use crate::AppWindow;
 use crate::playback_coordinator::{play_track, play_with_metadata};
 use crate::ui_models::queue_items_model;
-use crate::AppWindow;
 
-use super::PlaybackContext;
+use super::{PlaybackContext, SleepTimerMode};
 
 pub fn bind_queue_controls(
     app: &AppWindow,
     ctx: PlaybackContext,
     is_auto_advancing: Arc<Mutex<bool>>,
+    sleep_timer: Arc<Mutex<SleepTimerMode>>,
 ) {
     let queue_for_repeat = ctx.queue.clone();
     let library_for_repeat = ctx.library.clone();
@@ -35,6 +36,46 @@ pub fn bind_queue_controls(
         }
     });
 
+    let queue_for_autoplay = ctx.queue.clone();
+    let library_for_autoplay = ctx.library.clone();
+    let ui_weak_autoplay = ctx.ui_weak.clone();
+    app.on_toggle_autoplay(move || {
+        let enabled = !queue_for_autoplay.autoplay_enabled();
+        queue_for_autoplay.set_autoplay_enabled(enabled);
+        library_for_autoplay.set_autoplay_enabled(enabled);
+        if let Some(ui) = ui_weak_autoplay.upgrade() {
+            ui.set_autoplay_enabled(enabled);
+            ui.set_panel_message(slint::SharedString::from(if enabled {
+                "Autoplay recommendations enabled"
+            } else {
+                "Autoplay recommendations disabled"
+            }));
+        }
+    });
+
+    let player_for_sleep = Arc::clone(&ctx.player);
+    let ui_weak_sleep = ctx.ui_weak.clone();
+    app.on_cycle_sleep_timer(move || {
+        let next_mode = {
+            let mut guard = sleep_timer.lock().unwrap();
+            *guard = guard.cycle_next();
+            *guard
+        };
+        player_for_sleep.set_fade_gain(1.0);
+        let badge = next_mode.badge_label();
+        if let Some(ui) = ui_weak_sleep.upgrade() {
+            ui.set_sleep_timer_label(slint::SharedString::from(badge.clone()));
+            let msg = if badge.is_empty() {
+                "Sleep timer turned off".to_string()
+            } else if badge == "EOT" {
+                "Sleep timer: stop at end of current track".to_string()
+            } else {
+                format!("Sleep timer set to {}", badge)
+            };
+            ui.set_panel_message(slint::SharedString::from(msg));
+        }
+    });
+
     let ctx_for_retry = ctx.clone();
     app.on_retry_playback(move || {
         let query = ctx_for_retry.last_query.lock().unwrap().clone();
@@ -47,11 +88,13 @@ pub fn bind_queue_controls(
     let library_for_remove = ctx.library.clone();
     let ui_weak_remove = ctx.ui_weak.clone();
     app.on_remove_queue_item(move |index| {
-        if queue_for_remove.remove_at(index as usize).is_some()
-            && let Some(ui) = ui_weak_remove.upgrade() {
+        if queue_for_remove.remove_at(index as usize).is_some() {
+            library_for_remove.save_queue(queue_for_remove.to_track_records());
+            if let Some(ui) = ui_weak_remove.upgrade() {
                 ui.set_queue_items(queue_items_model(&queue_for_remove, &library_for_remove));
                 ui.set_panel_message(slint::SharedString::from("Removed from queue"));
             }
+        }
     });
 
     let queue_for_move_up = ctx.queue.clone();
@@ -59,10 +102,12 @@ pub fn bind_queue_controls(
     let ui_weak_move_up = ctx.ui_weak.clone();
     app.on_move_queue_item_up(move |index| {
         let index = index as usize;
-        if index > 0 && queue_for_move_up.move_item(index, index - 1)
-            && let Some(ui) = ui_weak_move_up.upgrade() {
+        if index > 0 && queue_for_move_up.move_item(index, index - 1) {
+            library_for_move_up.save_queue(queue_for_move_up.to_track_records());
+            if let Some(ui) = ui_weak_move_up.upgrade() {
                 ui.set_queue_items(queue_items_model(&queue_for_move_up, &library_for_move_up));
             }
+        }
     });
 
     let queue_for_move_down = ctx.queue.clone();
@@ -70,13 +115,15 @@ pub fn bind_queue_controls(
     let ui_weak_move_down = ctx.ui_weak.clone();
     app.on_move_queue_item_down(move |index| {
         let index = index as usize;
-        if queue_for_move_down.move_item(index, index + 1)
-            && let Some(ui) = ui_weak_move_down.upgrade() {
+        if queue_for_move_down.move_item(index, index + 1) {
+            library_for_move_down.save_queue(queue_for_move_down.to_track_records());
+            if let Some(ui) = ui_weak_move_down.upgrade() {
                 ui.set_queue_items(queue_items_model(
                     &queue_for_move_down,
                     &library_for_move_down,
                 ));
             }
+        }
     });
 
     let queue_for_clear = ctx.queue.clone();
@@ -84,6 +131,7 @@ pub fn bind_queue_controls(
     let ui_weak_clear = ctx.ui_weak.clone();
     app.on_clear_queue(move || {
         queue_for_clear.clear_upcoming();
+        library_for_clear.save_queue(Vec::new());
         if let Some(ui) = ui_weak_clear.upgrade() {
             ui.set_queue_items(queue_items_model(&queue_for_clear, &library_for_clear));
             ui.set_panel_message(slint::SharedString::from("Queue cleared"));
@@ -103,6 +151,9 @@ pub fn bind_queue_controls(
         *advancing = true;
         drop(advancing);
 
+        ctx_for_item
+            .library
+            .save_queue(ctx_for_item.queue.to_track_records());
         if let Some(ui) = ctx_for_item.ui_weak.upgrade() {
             ui.set_queue_items(queue_items_model(
                 &ctx_for_item.queue,
@@ -123,11 +174,6 @@ pub fn bind_queue_controls(
         let join_handle = tokio::spawn(async move {
             if let Some(preloaded) = preloaded {
                 let cache_path = library.cover_path(&preloaded.meta.id);
-                if !cache_path.exists()
-                    && let Some(path) = &preloaded.cover_path
-                        && let Ok(bytes) = std::fs::read(path) {
-                            let _ = library.store_cover(&preloaded.meta.id, &bytes);
-                        }
                 let cover_path = cache_path
                     .exists()
                     .then_some(cache_path)
@@ -155,8 +201,9 @@ pub fn bind_queue_controls(
         });
 
         if let Ok(mut guard) = abort_handle.lock()
-            && let Some(prev) = guard.replace(join_handle.abort_handle()) {
-                prev.abort();
-            }
+            && let Some(prev) = guard.replace(join_handle.abort_handle())
+        {
+            prev.abort();
+        }
     });
 }
