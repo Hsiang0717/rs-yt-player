@@ -644,4 +644,39 @@ mod tests {
         let selections: HashSet<_> = (0..128).map(|_| shuffled_index(2)).collect();
         assert_eq!(selections, HashSet::from([0, 1]));
     }
+
+    #[test]
+    fn pop_previous_restores_history_and_prepends_current() {
+        let queue = PlayQueue::new();
+        queue.record_current("Song 1".into());
+        queue.record_current("Song 2".into());
+        queue.record_current("Song 3".into());
+
+        assert_eq!(queue.pop_previous().as_deref(), Some("Song 2"));
+        assert_eq!(queue.current_query().as_deref(), Some("Song 2"));
+
+        // The track that was current ("Song 3") should now be at the front of upcoming queue
+        let (next_song, _) = queue.pop_next().expect("upcoming queue should contain previous current");
+        assert_eq!(next_song, "Song 3");
+    }
+
+    #[test]
+    fn pop_previous_when_history_empty_returns_none() {
+        let queue = PlayQueue::new();
+        assert_eq!(queue.pop_previous(), None);
+
+        queue.record_current("Song 1".into());
+        assert_eq!(queue.pop_previous(), None);
+        assert_eq!(queue.current_query().as_deref(), Some("Song 1"));
+    }
+
+    #[test]
+    fn autoplay_toggle_state() {
+        let queue = PlayQueue::new();
+        assert!(queue.autoplay_enabled());
+        queue.set_autoplay_enabled(false);
+        assert!(!queue.autoplay_enabled());
+        queue.set_autoplay_enabled(true);
+        assert!(queue.autoplay_enabled());
+    }
 }
