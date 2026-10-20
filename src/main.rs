@@ -20,22 +20,24 @@ slint::include_modules!();
 use anyhow::Result;
 use cli::run_cli_mode;
 use extractor::Extractor;
-use library::{LibraryStore, TrackRecord};
+use library::{LibraryStore, TrackRecord, format_duration_secs};
 use player::AudioPlayer;
 use queue::PlayQueue;
+use slint::ComponentHandle;
 use smtc::SmtcManager;
 use std::sync::{Arc, Mutex};
-use tracing::{error, info, Level};
+use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 use tray::SystemTray;
-use ui_callbacks::{register_ui_callbacks, PendingSeekState};
-use ui_models::{queue_items_model, records_model};
+use ui_callbacks::{PendingSeekState, SleepTimerMode, register_ui_callbacks};
+use ui_models::{
+    apply_queue_expanded, load_cached_cover_image, queue_items_model, records_model,
+};
 use win32_window::{acquire_single_instance, setup_windows_app_identity};
 use windows::Win32::Foundation::HWND;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 1. Initialize logging
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .finish();
@@ -45,12 +47,10 @@ async fn main() -> Result<()> {
     let is_smoke_test = raw_args.iter().any(|a| a == "--smoke-test");
     let is_cli = raw_args.iter().any(|a| a == "--cli");
 
-    // 2. Headless CLI / Smoke-Test Mode
     if is_smoke_test || is_cli {
         return run_cli_mode(raw_args, is_smoke_test).await;
     }
 
-    // 3. GUI Mode (Slint + Windows System Tray + SMTC)
     #[cfg(target_os = "windows")]
     let _single_instance_guard = match acquire_single_instance() {
         Some(guard) => guard,
@@ -67,11 +67,10 @@ async fn main() -> Result<()> {
 
     #[cfg(target_os = "windows")]
     unsafe {
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
 
-    // Initialize System Tray early on main GUI thread (STA)
     let tray = match SystemTray::new() {
         Ok(t) => {
             info!("System Tray icon initialized successfully.");
@@ -85,7 +84,6 @@ async fn main() -> Result<()> {
     };
 
     let app = AppWindow::new()?;
-    // Initialize yt-dlp first so the player uses the exact binary selected by Extractor.
     let extractor = Arc::new(Extractor::new().await?);
     let (stream, stream_handle) = rodio::OutputStream::try_default().map_err(|e| {
         anyhow::anyhow!("Failed to open default Windows audio output device: {}", e)
@@ -95,43 +93,106 @@ async fn main() -> Result<()> {
         extractor.yt_dlp_path().to_path_buf(),
     )?);
 
-    // Continuous Playback & Playlist Queue
+    // Load persisted Library & Session state
     let play_queue = PlayQueue::new();
     let library = LibraryStore::load();
-    library.compact_cache();
+    library.prune_cache_async(300);
+
     play_queue.set_repeat_mode(library.repeat_mode());
     play_queue.set_shuffle_enabled(library.shuffle_enabled());
+    play_queue.set_autoplay_enabled(library.autoplay_enabled());
+
+    // Restore volume and mute state
+    let initial_vol = library.volume();
+    let initial_muted = library.is_muted();
+    player.set_volume(if initial_muted { 0.0 } else { initial_vol });
+    app.set_volume_ratio(if initial_muted { 0.0 } else { initial_vol });
+    app.set_is_muted(initial_muted);
+
     app.set_repeat_mode_label(slint::SharedString::from(library.repeat_mode().label()));
     app.set_shuffle_enabled(library.shuffle_enabled());
-    app.set_favorite_items(records_model(library.favorites(), &library, None));
-    app.set_history_items(records_model(library.recent(), &library, None));
+    app.set_autoplay_enabled(library.autoplay_enabled());
+    app.set_pinned_on_top(library.always_on_top());
+
+    // Restore last session track, position, and upcoming queue
+    let (last_track_opt, last_pos_secs, saved_queue) = library.last_session();
+    play_queue.restore_saved_queue(saved_queue);
+
+    let last_query = Arc::new(Mutex::new(None::<String>));
+    if let Some(last_track) = &last_track_opt {
+        let track_url = last_track.video_url();
+        *last_query.lock().unwrap() = Some(track_url.clone());
+        play_queue.record_current(track_url.clone());
+        app.set_track_title(slint::SharedString::from(last_track.title.clone()));
+        app.set_track_artist(slint::SharedString::from(last_track.artist.clone()));
+        app.set_current_track_key(slint::SharedString::from(track_url));
+        app.set_current_is_favorite(library.is_favorite(&last_track.id));
+        if let Some(dur) = last_track.duration_secs.filter(|&d| d > 0.0) {
+            let pos = (last_pos_secs as f64).min(dur);
+            let cur_str = format_duration_secs(pos);
+            let tot_str = format_duration_secs(dur);
+            app.set_progress_ratio((pos / dur) as f32);
+            app.set_time_current(slint::SharedString::from(cur_str.clone()));
+            app.set_time_total(slint::SharedString::from(tot_str.clone()));
+            app.set_time_display(slint::SharedString::from(format!("{} / {}", cur_str, tot_str)));
+        }
+        if let Some(img) = load_cached_cover_image(&library, &last_track.id) {
+            app.set_cover_image(img);
+            app.set_has_cover(true);
+        }
+    }
+
+    let current_key = play_queue.current_query();
+    app.set_favorite_items(records_model(
+        library.favorites(),
+        &library,
+        current_key.as_deref(),
+    ));
+    app.set_history_items(records_model(
+        library.recent(),
+        &library,
+        current_key.as_deref(),
+    ));
     app.set_queue_items(queue_items_model(&play_queue, &library));
 
-    // Show initial window so Windows creates the HWND
+    if library.queue_expanded() {
+        apply_queue_expanded(&app, true);
+    }
+
     app.show()?;
 
     use i_slint_backend_winit::WinitWindowAccessor;
-    let initial_hwnd: Option<HWND> = app.window().with_winit_window(|winit_window| {
-        use raw_window_handle::HasWindowHandle;
-        if let Ok(handle) = winit_window.window_handle() {
-            if let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() {
+    let initial_hwnd: Option<HWND> = app
+        .window()
+        .with_winit_window(|winit_window| {
+            use raw_window_handle::HasWindowHandle;
+            if let Ok(handle) = winit_window.window_handle()
+                && let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw()
+            {
                 return Some(HWND(h.hwnd.get() as _));
             }
-        }
-        None
-    }).flatten();
+            None
+        })
+        .flatten();
 
-    info!("Directly obtained Slint HWND via WinitWindowAccessor: {:?}", initial_hwnd);
+    info!(
+        "Directly obtained Slint HWND via WinitWindowAccessor: {:?}",
+        initial_hwnd
+    );
     if let Some(hwnd) = initial_hwnd {
         unsafe {
             win32_window::attach_window_hooks(hwnd);
         }
+        if library.always_on_top() {
+            win32_window::set_always_on_top(hwnd, true);
+        }
+        if let Some((x, y)) = library.window_pos() {
+            win32_window::restore_window_position(hwnd, x, y);
+        }
     }
 
-    // Subclass the Slint window HWND to hook minimize -> tray
     let main_hwnd: Arc<Mutex<Option<HWND>>> = Arc::new(Mutex::new(initial_hwnd));
 
-    // Initialize Windows SMTC (System Media Transport Controls)
     let initial_hwnd = *main_hwnd.lock().unwrap();
     let (smtc, smtc_rx) = match SmtcManager::new(initial_hwnd) {
         Ok((manager, rx)) => {
@@ -144,17 +205,15 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Shared state coordinators
     let is_auto_advancing = Arc::new(Mutex::new(false));
     let current_loading_abort: playback_coordinator::LoadingAbortHandle =
         Arc::new(Mutex::new(None));
-    let last_query = Arc::new(Mutex::new(None::<String>));
     let pending_seek = Arc::new(Mutex::new(Option::<PendingSeekState>::None));
     let search_records = Arc::new(Mutex::new(Vec::<TrackRecord>::new()));
     let seek_seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let seek_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let sleep_timer = Arc::new(Mutex::new(SleepTimerMode::Off));
 
-    // Register all Slint GUI callbacks
     register_ui_callbacks(
         &app,
         Arc::clone(&player),
@@ -170,15 +229,15 @@ async fn main() -> Result<()> {
         Arc::clone(&main_hwnd),
         Arc::clone(&seek_seq),
         Arc::clone(&seek_lock),
+        Arc::clone(&sleep_timer),
     );
 
-    // Start background polling timer
     let _timer = app_timer::start_playback_polling_timer(
         &app,
         Arc::clone(&player),
         Arc::clone(&extractor),
-        play_queue,
-        library,
+        play_queue.clone(),
+        library.clone(),
         tray,
         smtc,
         smtc_rx,
@@ -190,12 +249,15 @@ async fn main() -> Result<()> {
         stream,
         seek_seq,
         seek_lock,
+        sleep_timer,
     );
 
-    // Run Slint Event Loop
     app.run()?;
 
-    // Clean up upon exit
+    if player.has_track() {
+        library.update_playback_position(player.current_position());
+    }
+    library.save_queue(play_queue.to_track_records());
     player.stop();
     Ok(())
 }

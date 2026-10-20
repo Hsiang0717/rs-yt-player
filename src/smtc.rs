@@ -158,7 +158,7 @@ impl SmtcManager {
         if let Some(ref url) = file_url {
             let meta = MediaMetadata {
                 title: Some(title),
-                album: Some("YouTube Pure Audio"),
+                album: Some("YouTube Audio Player"),
                 artist: Some(artist),
                 duration,
                 cover_url: Some(url),
@@ -170,7 +170,7 @@ impl SmtcManager {
 
         let meta = MediaMetadata {
             title: Some(title),
-            album: Some("YouTube Pure Audio"),
+            album: Some("YouTube Audio Player"),
             artist: Some(artist),
             duration,
             cover_url: None,

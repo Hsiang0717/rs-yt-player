@@ -1,19 +1,31 @@
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::info;
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GWL_EXSTYLE, GWL_STYLE, GetWindowLongPtrW, SIZE_MINIMIZED, SW_HIDE,
-    SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WM_SIZE, WM_SYSCOMMAND, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
+    FindWindowW, GWL_EXSTYLE, GWL_STYLE, GetWindowLongPtrW, GetWindowRect, HWND_NOTOPMOST,
+    HWND_TOPMOST, SIZE_MINIMIZED, SPI_GETWORKAREA, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+     SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW,
+    WM_EXITSIZEMOVE, WM_MOVING, WM_SIZE, WM_SYSCOMMAND, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    WS_MAXIMIZEBOX,
 };
 use windows::core::w;
-use tracing::info;
-
-use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const WINDOW_TITLE: &windows::core::PCWSTR = &w!("YouTube Audio Player");
+const SNAP_THRESHOLD_PX: i32 = 16;
 
 pub static SYSTEM_WENT_TO_SLEEP: AtomicBool = AtomicBool::new(false);
 pub static SYSTEM_RESUMED_FROM_SLEEP: AtomicBool = AtomicBool::new(false);
+pub static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(true);
+
+static LAST_MOVED_POS: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+static LAST_AUDIO_DEVICE_ID: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn is_window_visible() -> bool {
+    WINDOW_VISIBLE.load(Ordering::Relaxed)
+}
 
 pub fn take_system_resumed() -> bool {
     SYSTEM_RESUMED_FROM_SLEEP.swap(false, Ordering::SeqCst)
@@ -23,8 +35,15 @@ pub fn take_system_suspended() -> bool {
     SYSTEM_WENT_TO_SLEEP.swap(false, Ordering::SeqCst)
 }
 
-/// Win32 window subclass procedure to intercept SC_MINIMIZE and WM_POWERBROADCAST.
-/// Hides the window on minimize, and detects system sleep/resume transitions.
+pub fn take_window_moved_pos() -> Option<(i32, i32)> {
+    LAST_MOVED_POS.lock().ok()?.take()
+}
+
+/// Win32 window subclass procedure:
+/// - Intercepts SC_MINIMIZE to hide to system tray
+/// - Intercepts WM_POWERBROADCAST for sleep/resume
+/// - Intercepts WM_MOVING for magnetic screen edge snapping
+/// - Intercepts WM_EXITSIZEMOVE to persist window coordinates
 pub unsafe extern "system" fn window_subclass_proc(
     hwnd: HWND,
     msg: u32,
@@ -43,9 +62,56 @@ pub unsafe extern "system" fn window_subclass_proc(
         if wparam.0 == PBT_APMSUSPEND_CODE {
             info!("Power notification: System is suspending (entering sleep/hibernate).");
             SYSTEM_WENT_TO_SLEEP.store(true, Ordering::SeqCst);
-        } else if wparam.0 == PBT_APMRESUMEAUTOMATIC_CODE || wparam.0 == PBT_APMRESUMESUSPEND_CODE {
+        } else if wparam.0 == PBT_APMRESUMEAUTOMATIC_CODE || wparam.0 == PBT_APMRESUMESUSPEND_CODE
+        {
             info!("Power notification: System resumed from sleep/hibernate.");
             SYSTEM_RESUMED_FROM_SLEEP.store(true, Ordering::SeqCst);
+        }
+    }
+
+    // Magnetic edge snapping during window drag
+    if msg == WM_MOVING && lparam.0 != 0 {
+        unsafe {
+            let rect = &mut *(lparam.0 as *mut RECT);
+            let mut work_area = RECT::default();
+            if SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some(&mut work_area as *mut _ as *mut _),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+            .is_ok()
+            {
+                let width = rect.right - rect.left;
+                let height = rect.bottom - rect.top;
+
+                if (rect.left - work_area.left).abs() <= SNAP_THRESHOLD_PX {
+                    rect.left = work_area.left;
+                    rect.right = rect.left + width;
+                } else if (work_area.right - rect.right).abs() <= SNAP_THRESHOLD_PX {
+                    rect.right = work_area.right;
+                    rect.left = rect.right - width;
+                }
+
+                if (rect.top - work_area.top).abs() <= SNAP_THRESHOLD_PX {
+                    rect.top = work_area.top;
+                    rect.bottom = rect.top + height;
+                } else if (work_area.bottom - rect.bottom).abs() <= SNAP_THRESHOLD_PX {
+                    rect.bottom = work_area.bottom;
+                    rect.top = rect.bottom - height;
+                }
+            }
+        }
+    }
+
+    if msg == WM_EXITSIZEMOVE {
+        unsafe {
+            let mut rect = RECT::default();
+            if GetWindowRect(hwnd, &mut rect).is_ok()
+                && let Ok(mut guard) = LAST_MOVED_POS.lock()
+            {
+                *guard = Some((rect.left, rect.top));
+            }
         }
     }
 
@@ -53,10 +119,7 @@ pub unsafe extern "system" fn window_subclass_proc(
     let minimized_size = msg == WM_SIZE && wparam.0 == SIZE_MINIMIZED as usize;
     if minimize_command || minimized_size {
         info!("Window minimize requested: Hiding to system tray without stopping audio.");
-        unsafe {
-            set_taskbar_button(hwnd, false);
-            let _ = ShowWindow(hwnd, SW_HIDE);
-        }
+        minimize_to_tray(hwnd);
         trim_process_working_set();
         return LRESULT(0);
     }
@@ -92,6 +155,51 @@ pub fn set_taskbar_button(hwnd: HWND, visible: bool) {
     }
 }
 
+pub fn set_always_on_top(hwnd: HWND, topmost: bool) {
+    unsafe {
+        let z_order = if topmost {
+            HWND_TOPMOST
+        } else {
+            HWND_NOTOPMOST
+        };
+        let _ = SetWindowPos(
+            hwnd,
+            z_order,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+pub fn restore_window_position(hwnd: HWND, x: i32, y: i32) {
+    unsafe {
+        let mut work_area = RECT::default();
+        if SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some(&mut work_area as *mut _ as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+        .is_ok()
+        {
+            let clamped_x = x.clamp(work_area.left, (work_area.right - 200).max(work_area.left));
+            let clamped_y = y.clamp(work_area.top, (work_area.bottom - 100).max(work_area.top));
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                clamped_x,
+                clamped_y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
 pub fn start_window_drag(hwnd: HWND) {
     use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
     use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_NCLBUTTONDOWN};
@@ -103,9 +211,20 @@ pub fn start_window_drag(hwnd: HWND) {
 }
 
 pub fn minimize_to_tray(hwnd: HWND) {
+    WINDOW_VISIBLE.store(false, Ordering::SeqCst);
     set_taskbar_button(hwnd, false);
     unsafe {
         let _ = ShowWindow(hwnd, SW_HIDE);
+    }
+}
+
+pub fn restore_from_tray(hwnd: HWND) {
+    WINDOW_VISIBLE.store(true, Ordering::SeqCst);
+    unsafe {
+        set_taskbar_button(hwnd, true);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = SetForegroundWindow(hwnd);
     }
 }
 
@@ -126,18 +245,14 @@ pub fn wake_existing_instance() {
     unsafe {
         let hwnd = FindWindowW(None, *WINDOW_TITLE);
         if hwnd.0 != 0 {
-            set_taskbar_button(hwnd, true);
-            let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_SHOW);
-            let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_RESTORE);
-            let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+            restore_from_tray(hwnd);
         }
     }
 }
 
 pub fn acquire_single_instance() -> Option<SingleInstanceGuard> {
-    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
     use windows::Win32::System::Threading::CreateMutexW;
-    use windows::core::w;
 
     unsafe {
         let mutex_name = w!("Local\\YouTubeAudioPlayer_SingleInstance_Mutex");
@@ -177,7 +292,6 @@ pub fn find_current_process_window() -> Option<HWND> {
                     String::new()
                 };
 
-                // Only hook the winit top-level window ("Window Class"), ignoring helper/IME/thread windows
                 if class_name == "Window Class" {
                     let mut title_buf = [0u16; 128];
                     let len = GetWindowTextW(hwnd, &mut title_buf);
@@ -190,12 +304,12 @@ pub fn find_current_process_window() -> Option<HWND> {
                     if title.contains("YouTube Audio Player") || ctx.found_hwnd.is_none() {
                         ctx.found_hwnd = Some(hwnd);
                         if title.contains("YouTube Audio Player") {
-                            return BOOL(0); // Exact title match found, stop enumeration
+                            return BOOL(0);
                         }
                     }
                 }
             }
-            BOOL(1) // Continue
+            BOOL(1)
         }
     }
 
@@ -213,7 +327,6 @@ pub fn find_current_process_window() -> Option<HWND> {
 
 pub unsafe fn attach_window_hooks(hwnd: HWND) {
     unsafe {
-        // Disable maximize box, keeping the resizable frame style
         let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
         let fixed_style = style & !(WS_MAXIMIZEBOX.0 as isize);
         let _ = SetWindowLongPtrW(hwnd, GWL_STYLE, fixed_style);
@@ -228,9 +341,9 @@ pub unsafe fn attach_window_hooks(hwnd: HWND) {
         );
         let _ = SetWindowSubclass(hwnd, Some(window_subclass_proc), 1001, 0);
 
-        // Ensure window is shown and focused immediately on launch (resolves initial click requirement)
-        let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_SHOW);
-        let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+        WINDOW_VISIBLE.store(true, Ordering::SeqCst);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetForegroundWindow(hwnd);
         let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetActiveWindow(hwnd);
         let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(hwnd);
     }
@@ -240,11 +353,7 @@ pub fn try_find_and_hook() -> Option<HWND> {
     unsafe {
         let hwnd = find_current_process_window().or_else(|| {
             let h = FindWindowW(None, *WINDOW_TITLE);
-            if h.0 != 0 {
-                Some(h)
-            } else {
-                None
-            }
+            if h.0 != 0 { Some(h) } else { None }
         });
 
         if let Some(hwnd) = hwnd {
@@ -256,72 +365,150 @@ pub fn try_find_and_hook() -> Option<HWND> {
     }
 }
 
-pub fn setup_windows_app_identity() {
-    if let Ok(exe_path) = std::env::current_exe() {
-        let exe_str = exe_path.to_string_lossy().to_string();
-        std::thread::spawn(move || {
-            // Delay identity registration by 2 seconds so PowerShell does not compete with main window focus
-            std::thread::sleep(std::time::Duration::from_millis(2000));
-            use std::os::windows::process::CommandExt;
-            let script = format!(
-                r#"
-                $appName = "YouTube Audio Player"
-                $exe = "{}"
+/// Checks whether the Windows default audio output endpoint has changed (e.g., headphone/Bluetooth hot-plug).
+pub fn check_default_audio_device_changed() -> bool {
+    unsafe {
+        use windows::Win32::Media::Audio::{
+            IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender,
+        };
+        use windows::Win32::System::Com::{
+            CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+            CoTaskMemFree,
+        };
 
-                # 1. Register in Applications for FriendlyAppName and ApplicationName
-                $appReg = "HKCU:\Software\Classes\Applications\YouTubeAudioPlayer.exe"
-                if (!(Test-Path $appReg)) {{
-                    New-Item -Path $appReg -Force | Out-Null
-                }}
-                Set-ItemProperty -Path $appReg -Name "FriendlyAppName" -Value $appName -Force
-                Set-ItemProperty -Path $appReg -Name "ApplicationName" -Value $appName -Force
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let Ok(enumerator) =
+            CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_INPROC_SERVER)
+        else {
+            return false;
+        };
+        let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, eConsole) else {
+            return false;
+        };
+        let Ok(id_pwstr) = device.GetId() else {
+            return false;
+        };
+        let current_id = id_pwstr.to_string().unwrap_or_default();
+        CoTaskMemFree(Some(id_pwstr.0 as *const _));
 
-                # 2. Register App Paths
-                $appPaths = "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\YouTubeAudioPlayer.exe"
-                if (!(Test-Path $appPaths)) {{
-                    New-Item -Path $appPaths -Force | Out-Null
-                }}
-                Set-ItemProperty -Path $appPaths -Name "(Default)" -Value $exe -Force
-
-                # 3. Create or update user Start Menu shortcut
-                $programs = [Environment]::GetFolderPath("Programs")
-                if ($programs -and (Test-Path $programs)) {{
-                    $lnkPath = Join-Path $programs "$appName.lnk"
-                    $ws = New-Object -ComObject WScript.Shell
-                    $s = $ws.CreateShortcut($lnkPath)
-                    $s.TargetPath = $exe
-                    $s.IconLocation = "$exe,0"
-                    $s.Description = $appName
-                    $s.Save()
-                }}
-
-                # 4. Create or update common (All Users) Start Menu shortcut
-                $commonPrograms = [Environment]::GetFolderPath("CommonPrograms")
-                if ($commonPrograms -and (Test-Path $commonPrograms)) {{
-                    try {{
-                        $commonLnk = Join-Path $commonPrograms "$appName.lnk"
-                        $ws = New-Object -ComObject WScript.Shell
-                        $s = $ws.CreateShortcut($commonLnk)
-                        $s.TargetPath = $exe
-                        $s.IconLocation = "$exe,0"
-                        $s.Description = $appName
-                        $s.Save()
-                    }} catch {{}}
-                }}
-                "#,
-                exe_str.replace('\\', "\\\\")
-            );
-            let _ = std::process::Command::new("powershell")
-                .args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-WindowStyle",
-                    "Hidden",
-                    "-Command",
-                    &script,
-                ])
-                .creation_flags(0x08000000)
-                .output();
-        });
+        if current_id.is_empty() {
+            return false;
+        }
+        let mut last = LAST_AUDIO_DEVICE_ID.lock().unwrap();
+        match &*last {
+            Some(prev) if prev != &current_id => {
+                info!(
+                    "Default audio output device hot-swapped: {} -> {}",
+                    prev, current_id
+                );
+                *last = Some(current_id);
+                true
+            }
+            None => {
+                *last = Some(current_id);
+                false
+            }
+            _ => false,
+        }
     }
+}
+
+/// Native in-process Windows App Identity & Shortcut registration using Win32 Registry & COM IShellLinkW.
+/// Eliminates spawning hidden powershell.exe processes (zero AV false positives & zero startup lag).
+pub fn setup_windows_app_identity() {
+    let Ok(exe_path) = std::env::current_exe() else {
+        return;
+    };
+    let exe_str = exe_path.to_string_lossy().to_string();
+
+    std::thread::spawn(move || unsafe {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::System::Com::{
+            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+            IPersistFile,
+        };
+        use windows::Win32::System::Registry::{
+            HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
+            RegCreateKeyExW, RegSetValueExW,
+        };
+        use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+        use windows::core::{Interface, PCWSTR};
+
+        fn to_wide(s: &str) -> Vec<u16> {
+            std::ffi::OsStr::new(s)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        }
+
+        unsafe fn set_reg_sz(hkey: HKEY, name: Option<PCWSTR>, val: &str) {
+            let wide = to_wide(val);
+            unsafe {
+                let bytes = std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2);
+                let _ = RegSetValueExW(hkey, name.unwrap_or(PCWSTR::null()), 0, REG_SZ, Some(bytes));
+            }
+        }
+
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+
+        // 1. Register HKCU\Software\Classes\Applications\YouTubeAudioPlayer.exe
+        let app_key_path = to_wide(r"Software\Classes\Applications\YouTubeAudioPlayer.exe");
+        let mut hkey = HKEY::default();
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(app_key_path.as_ptr()),
+            0,
+            None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            None,
+            &mut hkey,
+            None,
+        )
+        .is_ok()
+        {
+            set_reg_sz(hkey, Some(w!("FriendlyAppName")), "YouTube Audio Player");
+            set_reg_sz(hkey, Some(w!("ApplicationName")), "YouTube Audio Player");
+            let _ = RegCloseKey(hkey);
+        }
+
+        // 2. Register HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\YouTubeAudioPlayer.exe
+        let paths_key_path =
+            to_wide(r"Software\Microsoft\Windows\CurrentVersion\App Paths\YouTubeAudioPlayer.exe");
+        let mut hkey_paths = HKEY::default();
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(paths_key_path.as_ptr()),
+            0,
+            None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            None,
+            &mut hkey_paths,
+            None,
+        )
+        .is_ok()
+        {
+            set_reg_sz(hkey_paths, None, &exe_str);
+            let _ = RegCloseKey(hkey_paths);
+        }
+
+        // 3. Create Start Menu shortcut natively via IShellLinkW if not already pointing to current exe
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            let lnk_path = std::path::PathBuf::from(appdata)
+                .join(r"Microsoft\Windows\Start Menu\Programs\YouTube Audio Player.lnk");
+            if let Ok(shell_link) =
+                CoCreateInstance::<_, IShellLinkW>(&ShellLink, None, CLSCTX_INPROC_SERVER)
+            {
+                let exe_wide = to_wide(&exe_str);
+                let _ = shell_link.SetPath(PCWSTR(exe_wide.as_ptr()));
+                let _ = shell_link.SetIconLocation(PCWSTR(exe_wide.as_ptr()), 0);
+                let _ = shell_link.SetDescription(w!("YouTube Audio Player"));
+                if let Ok(persist_file) = shell_link.cast::<IPersistFile>() {
+                    let lnk_wide = to_wide(&lnk_path.to_string_lossy());
+                    let _ = persist_file.Save(PCWSTR(lnk_wide.as_ptr()), true);
+                }
+            }
+        }
+    });
 }

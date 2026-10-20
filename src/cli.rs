@@ -35,7 +35,7 @@ pub async fn run_cli_mode(raw_args: Vec<String>, is_smoke_test: bool) -> Result<
     }
 
     println!("============================================================");
-    println!("     Rust YouTube Pure-Audio Player (CLI / Smoke Mode)      ");
+    println!("         YouTube Audio Player (CLI / Smoke Mode)            ");
     println!("============================================================\n");
 
     let args: Vec<String> = raw_args
