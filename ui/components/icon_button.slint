@@ -1,11 +1,10 @@
-import { Theme, TooltipState } from "../theme.slint";
+import { Theme } from "../theme.slint";
 
 export component IconButton inherits Rectangle {
     in property <image> icon;
     in property <length> icon_size: 16px;
     in property <bool> active: false;
     in property <bool> enabled: true;
-    in property <string> tooltip: "";
     in property <color> active_color: Theme.accent_primary;
     in property <color> hover_color: Theme.text_primary;
     in property <color> default_color: Theme.text_muted;
@@ -32,19 +31,7 @@ export component IconButton inherits Rectangle {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? pointer : default;
         clicked => {
-            if (root.tooltip != "" && TooltipState.text == root.tooltip) {
-                TooltipState.text = "";
-            }
             root.clicked();
-        }
-        changed has-hover => {
-            if (root.tooltip != "") {
-                if (self.has-hover) {
-                    TooltipState.text = root.tooltip;
-                } else if (TooltipState.text == root.tooltip) {
-                    TooltipState.text = "";
-                }
-            }
         }
     }
 }

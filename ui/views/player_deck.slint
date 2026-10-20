@@ -1,4 +1,4 @@
-import { Theme, TooltipState } from "../theme.slint";
+import { Theme } from "../theme.slint";
 import { InteractiveProgressBar } from "../components/progress_bar.slint";
 import { InteractiveVolumeBar } from "../components/volume_bar.slint";
 import { LoadingSpinner } from "../components/loading_spinner.slint";
@@ -174,13 +174,6 @@ export component PlayerDeckView inherits Rectangle {
                         TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.toggle_autoplay(); }
-                            changed has-hover => {
-                                if (self.has-hover) {
-                                    TooltipState.text = root.autoplay_enabled ? "Autoplay Recommendations: ON" : "Autoplay Recommendations: OFF";
-                                } else {
-                                    TooltipState.text = "";
-                                }
-                            }
                         }
                     }
 
@@ -218,13 +211,6 @@ export component PlayerDeckView inherits Rectangle {
                         TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.cycle_sleep_timer(); }
-                            changed has-hover => {
-                                if (self.has-hover) {
-                                    TooltipState.text = root.sleep_timer_label != "" ? ("Sleep Timer: " + root.sleep_timer_label + " (Click to cycle)") : "Sleep Timer: OFF (Click for 15m / 30m / 60m / EOT)";
-                                } else {
-                                    TooltipState.text = "";
-                                }
-                            }
                         }
                     }
 
@@ -249,16 +235,6 @@ export component PlayerDeckView inherits Rectangle {
                                 vertical-alignment: center;
                             }
                         }
-
-                        TouchArea {
-                            changed has-hover => {
-                                if (self.has-hover) {
-                                    TooltipState.text = "Native Audio Stream Format (" + root.track_badge + ")";
-                                } else {
-                                    TooltipState.text = "";
-                                }
-                            }
-                        }
                     }
 
                     if root.is_loading: IconButton {
@@ -268,7 +244,6 @@ export component PlayerDeckView inherits Rectangle {
                         icon_size: 11px;
                         default_color: Theme.accent_danger;
                         hover_color: #E09E8A;
-                        tooltip: "Cancel Loading";
                         clicked => { root.cancel_loading(); }
                     }
 
@@ -279,7 +254,6 @@ export component PlayerDeckView inherits Rectangle {
                         icon_size: 12px;
                         default_color: Theme.accent_primary;
                         hover_color: Theme.accent_primary_hover;
-                        tooltip: "Retry Track";
                         clicked => { root.retry_playback(); }
                     }
 
@@ -291,7 +265,6 @@ export component PlayerDeckView inherits Rectangle {
                         active: root.current_is_favorite;
                         active_color: Theme.accent_gold;
                         default_color: Theme.text_secondary;
-                        tooltip: root.current_is_favorite ? "Remove from Saved" : "Save to Favorites";
                         clicked => { root.toggle_current_favorite(); }
                     }
                 }
@@ -345,7 +318,6 @@ export component PlayerDeckView inherits Rectangle {
                         active: root.shuffle_enabled;
                         active_color: Theme.accent_primary;
                         default_color: Theme.text_muted;
-                        tooltip: root.shuffle_enabled ? "Shuffle: ON" : "Shuffle: OFF";
                         clicked => { root.toggle_shuffle(); }
                     }
 
@@ -353,7 +325,6 @@ export component PlayerDeckView inherits Rectangle {
                         icon: @image-url("../icons/prev.svg");
                         icon_size: 15px;
                         default_color: Theme.text_primary;
-                        tooltip: "Previous / Restart Track";
                         clicked => { root.play_previous(); }
                     }
 
@@ -376,13 +347,6 @@ export component PlayerDeckView inherits Rectangle {
                         play_touch := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.toggle_play_pause(); }
-                            changed has-hover => {
-                                if (self.has-hover) {
-                                    TooltipState.text = root.is_playing ? "Pause (Space)" : "Play (Space)";
-                                } else {
-                                    TooltipState.text = "";
-                                }
-                            }
                         }
                     }
 
@@ -390,7 +354,6 @@ export component PlayerDeckView inherits Rectangle {
                         icon: @image-url("../icons/next.svg");
                         icon_size: 15px;
                         default_color: Theme.text_primary;
-                        tooltip: "Next Track";
                         clicked => { root.play_next(); }
                     }
 
@@ -406,7 +369,6 @@ export component PlayerDeckView inherits Rectangle {
                             active: root.repeat_mode_label != "REPEAT OFF";
                             active_color: Theme.accent_primary;
                             default_color: Theme.text_muted;
-                            tooltip: root.repeat_mode_label;
                             clicked => { root.cycle_repeat_mode(); }
                         }
 
@@ -442,7 +404,6 @@ export component PlayerDeckView inherits Rectangle {
                             active: root.is_muted;
                             active_color: Theme.accent_gold;
                             default_color: Theme.text_secondary;
-                            tooltip: root.is_muted ? "Unmute (M)" : "Mute (M)";
                             clicked => { root.toggle_mute(); }
                         }
 
@@ -490,13 +451,6 @@ export component PlayerDeckView inherits Rectangle {
                         chevron_touch := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.toggle_queue(); }
-                            changed has-hover => {
-                                if (self.has-hover) {
-                                    TooltipState.text = root.queue_expanded ? "Collapse Playlist Drawer" : "Expand Playlist Drawer";
-                                } else {
-                                    TooltipState.text = "";
-                                }
-                            }
                         }
                     }
                 }

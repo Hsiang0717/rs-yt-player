@@ -1,4 +1,4 @@
-import { Theme, TooltipState } from "theme.slint";
+import { Theme } from "theme.slint";
 import { TrackRow } from "models.slint";
 export { TrackRow }
 
@@ -246,27 +246,6 @@ export component AppWindow inherits Window {
 
                 play_history(k) => { root.play_history(k); }
                 favorite_history(k) => { root.favorite_history(k); }
-            }
-        }
-
-        // Non-clipped Floating Tooltip Pill
-        if TooltipState.text != "": Rectangle {
-            x: 12px;
-            y: 44px;
-            z: 999;
-            height: 20px;
-            width: tooltip_txt.preferred-width + 14px;
-            border-radius: 4px;
-            background: Theme.surface_active;
-            border-width: 1px;
-            border-color: Theme.accent_primary;
-
-            tooltip_txt := Text {
-                text: TooltipState.text;
-                font-size: 10px;
-                color: Theme.text_primary;
-                horizontal-alignment: center;
-                vertical-alignment: center;
             }
         }
     }

@@ -1,4 +1,4 @@
-import { Theme, TooltipState } from "../theme.slint";
+import { Theme } from "../theme.slint";
 import { IconButton } from "../components/icon_button.slint";
 
 export component TitleBarView inherits Rectangle {
@@ -150,7 +150,6 @@ export component TitleBarView inherits Rectangle {
                     icon_size: 11px;
                     default_color: Theme.text_muted;
                     hover_color: Theme.text_primary;
-                    tooltip: "Clear Search";
                     clicked => {
                         root.search_query = "";
                         search_input.focus();
@@ -177,7 +176,6 @@ export component TitleBarView inherits Rectangle {
                 active_color: Theme.accent_primary;
                 default_color: Theme.text_secondary;
                 hover_color: Theme.text_primary;
-                tooltip: root.always_on_top ? "Unpin Always on Top" : "Pin Always on Top";
                 clicked => { root.toggle_always_on_top(); }
             }
 
@@ -188,7 +186,6 @@ export component TitleBarView inherits Rectangle {
                 icon_size: 13px;
                 default_color: Theme.text_secondary;
                 hover_color: Theme.text_primary;
-                tooltip: "Minimize to System Tray";
                 clicked => { root.minimize_window(); }
             }
 
@@ -199,7 +196,6 @@ export component TitleBarView inherits Rectangle {
                 icon_size: 13px;
                 default_color: Theme.text_secondary;
                 hover_color: Theme.accent_danger;
-                tooltip: "Quit Application";
                 clicked => { root.close_window(); }
             }
         }

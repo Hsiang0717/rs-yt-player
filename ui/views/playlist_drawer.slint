@@ -1,5 +1,5 @@
 import { ListView } from "std-widgets.slint";
-import { Theme, TooltipState } from "../theme.slint";
+import { Theme } from "../theme.slint";
 import { TrackRow } from "../models.slint";
 import { IconButton } from "../components/icon_button.slint";
 import { TrackItemView } from "track_item.slint";
@@ -108,9 +108,6 @@ export component PlaylistDrawerView inherits Rectangle {
                     play_all_touch := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.play_all(root.panel_tab); }
-                        changed has-hover => {
-                            TooltipState.text = self.has-hover ? "Replace queue and play all tracks in this list" : "";
-                        }
                     }
                 }
 
@@ -135,9 +132,6 @@ export component PlaylistDrawerView inherits Rectangle {
                     queue_all_touch := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.enqueue_all(root.panel_tab); }
-                        changed has-hover => {
-                            TooltipState.text = self.has-hover ? "Append all tracks in this list to upcoming queue" : "";
-                        }
                     }
                 }
             }
@@ -150,7 +144,6 @@ export component PlaylistDrawerView inherits Rectangle {
                 icon_size: 14px;
                 default_color: Theme.accent_danger;
                 hover_color: #E09E8A;
-                tooltip: "Clear Upcoming Queue";
                 clicked => { root.clear_queue(); }
             }
         }

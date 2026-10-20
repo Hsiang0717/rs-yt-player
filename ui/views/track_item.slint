@@ -125,7 +125,6 @@ export component TrackItemView inherits Rectangle {
                 icon_size: 13px;
                 default_color: Theme.text_secondary;
                 hover_color: Theme.accent_primary;
-                tooltip: "Play Next";
                 clicked => { root.play_next(); }
             }
 
@@ -136,7 +135,6 @@ export component TrackItemView inherits Rectangle {
                 icon_size: 13px;
                 default_color: Theme.accent_primary;
                 hover_color: Theme.accent_primary_hover;
-                tooltip: "Add to Queue";
                 clicked => { root.enqueue(); }
             }
 
@@ -148,7 +146,6 @@ export component TrackItemView inherits Rectangle {
                 active: root.item.is_favorite;
                 active_color: Theme.accent_gold;
                 default_color: Theme.text_secondary;
-                tooltip: root.item.is_favorite ? "Remove Favorite" : "Save to Favorites";
                 clicked => { root.toggle_fav(); }
             }
         }
@@ -164,7 +161,6 @@ export component TrackItemView inherits Rectangle {
                 icon_size: 13px;
                 default_color: Theme.text_secondary;
                 hover_color: Theme.accent_primary;
-                tooltip: "Play Next";
                 clicked => { root.play_next(); }
             }
 
@@ -175,7 +171,6 @@ export component TrackItemView inherits Rectangle {
                 icon_size: 13px;
                 default_color: Theme.accent_primary;
                 hover_color: Theme.accent_primary_hover;
-                tooltip: "Add to Queue";
                 clicked => { root.enqueue(); }
             }
 
@@ -187,7 +182,6 @@ export component TrackItemView inherits Rectangle {
                 active: root.item.is_favorite;
                 active_color: Theme.accent_gold;
                 default_color: Theme.text_secondary;
-                tooltip: root.item.is_favorite ? "Remove Favorite" : "Save to Favorites";
                 clicked => { root.toggle_fav(); }
             }
         }
@@ -203,7 +197,6 @@ export component TrackItemView inherits Rectangle {
                 icon_size: 13px;
                 default_color: Theme.text_secondary;
                 hover_color: Theme.accent_primary;
-                tooltip: "Play Next";
                 clicked => { root.play_next(); }
             }
 
@@ -214,7 +207,6 @@ export component TrackItemView inherits Rectangle {
                 icon_size: 13px;
                 default_color: Theme.accent_primary;
                 hover_color: Theme.accent_primary_hover;
-                tooltip: "Add to Queue";
                 clicked => { root.enqueue(); }
             }
 
@@ -225,7 +217,6 @@ export component TrackItemView inherits Rectangle {
                 icon_size: 13px;
                 default_color: Theme.accent_gold;
                 hover_color: Theme.accent_gold_hover;
-                tooltip: "Remove from Saved";
                 clicked => { root.remove(); }
             }
         }
@@ -242,7 +233,6 @@ export component TrackItemView inherits Rectangle {
                 enabled: root.index > 0;
                 default_color: Theme.text_secondary;
                 hover_color: Theme.accent_primary;
-                tooltip: "Move Up";
                 clicked => { root.move_up(); }
             }
 
@@ -254,7 +244,6 @@ export component TrackItemView inherits Rectangle {
                 enabled: root.index + 1 < root.total_count;
                 default_color: Theme.text_secondary;
                 hover_color: Theme.accent_primary;
-                tooltip: "Move Down";
                 clicked => { root.move_down(); }
             }
 
@@ -265,7 +254,6 @@ export component TrackItemView inherits Rectangle {
                 icon_size: 13px;
                 default_color: Theme.accent_danger;
                 hover_color: #E09E8A;
-                tooltip: "Remove from Queue";
                 clicked => { root.remove(); }
             }
         }
