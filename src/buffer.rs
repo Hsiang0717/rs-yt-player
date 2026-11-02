@@ -75,6 +75,13 @@ impl TrackedAudioBuffer {
         let producer_handle = thread::Builder::new()
             .name("audio-buffer-producer".to_string())
             .spawn(move || {
+                #[cfg(windows)]
+                unsafe {
+                    use windows::Win32::System::Threading::{
+                        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+                    };
+                    let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+                }
                 let chunk_size = effective_capacity.min(16 * 1024);
                 let mut chunk = vec![0u8; chunk_size];
                 loop {

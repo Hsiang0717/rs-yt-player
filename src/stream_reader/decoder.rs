@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, anyhow};
+use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{Decoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
@@ -12,18 +15,30 @@ use symphonia::core::probe::Hint;
 
 use super::range_source::AsyncRangeMediaSource;
 
+struct DecodedBufferState {
+    samples: VecDeque<f32>,
+    is_eof: bool,
+    is_terminated: bool,
+}
+
 pub struct DecodedAudioSource {
+    sample_rate: u32,
+    channels: u16,
+    consumed_samples: Arc<AtomicU64>,
+    loudness_gain: f32,
+    state: Arc<(Mutex<DecodedBufferState>, Condvar, Condvar)>,
+    capacity: usize,
+    _worker_handle: Option<thread::JoinHandle<()>>,
+}
+
+struct InternalAudioDecoder {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn Decoder>,
     track_id: u32,
-    sample_rate: u32,
-    channels: u16,
     sample_buf: Option<SampleBuffer<f32>>,
     sample_position: usize,
     sample_len: usize,
     samples_to_skip: u64,
-    consumed_samples: Arc<AtomicU64>,
-    loudness_gain: f32,
 }
 
 struct ProbeGateSource {
@@ -177,19 +192,117 @@ impl DecodedAudioSource {
             (start_offset_secs.max(0.0) * sample_rate as f32 * channels as f32) as u64
         };
 
-        Ok(Self {
+        let internal = InternalAudioDecoder {
             format,
             decoder,
             track_id,
-            sample_rate,
-            channels,
             sample_buf: None,
             sample_position: 0,
             sample_len: 0,
             samples_to_skip,
+        };
+
+        let capacity = ((sample_rate as usize * channels as usize) * 3).max(64 * 1024);
+        let state = Arc::new((
+            Mutex::new(DecodedBufferState {
+                samples: VecDeque::with_capacity(capacity.min(64 * 1024)),
+                is_eof: false,
+                is_terminated: false,
+            }),
+            Condvar::new(), // not_empty
+            Condvar::new(), // not_full
+        ));
+
+        let worker_state = Arc::clone(&state);
+        let worker_handle = thread::Builder::new()
+            .name("audio-decode-worker".to_string())
+            .spawn(move || {
+                #[cfg(windows)]
+                unsafe {
+                    use windows::Win32::System::Threading::{
+                        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+                    };
+                    let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+                }
+
+                let mut internal = internal;
+                let mut chunk = Vec::with_capacity(4096);
+
+                loop {
+                    let (lock, not_empty, not_full) = &*worker_state;
+                    let mut guard = lock.lock().unwrap();
+                    while !guard.is_terminated && !guard.is_eof && guard.samples.len() >= capacity {
+                        guard = not_full.wait(guard).unwrap();
+                    }
+                    if guard.is_terminated {
+                        break;
+                    }
+                    drop(guard);
+
+                    chunk.clear();
+                    while chunk.len() < 4096 {
+                        if let Some(sample) = internal.next_sample() {
+                            chunk.push(sample);
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let mut guard = lock.lock().unwrap();
+                    if guard.is_terminated {
+                        break;
+                    }
+                    if chunk.is_empty() {
+                        guard.is_eof = true;
+                        not_empty.notify_all();
+                        break;
+                    } else {
+                        guard.samples.extend(chunk.drain(..));
+                        not_empty.notify_all();
+                    }
+                }
+            })
+            .ok();
+
+        // Warm up: wait briefly (up to 80ms) so buffer starts with initial samples ready
+        {
+            let (lock, not_empty, _) = &*state;
+            let guard = lock.lock().unwrap();
+            if guard.samples.len() < 4096 && !guard.is_eof {
+                let _ = not_empty.wait_timeout(guard, Duration::from_millis(80));
+            }
+        }
+
+        Ok(Self {
+            sample_rate,
+            channels,
             consumed_samples: Arc::new(AtomicU64::new(0)),
             loudness_gain: 1.0,
+            state,
+            capacity,
+            _worker_handle: worker_handle,
         })
+    }
+}
+
+impl InternalAudioDecoder {
+    fn next_sample(&mut self) -> Option<f32> {
+        loop {
+            if self.sample_position >= self.sample_len && !self.decode_next_packet() {
+                return None;
+            }
+            if self.samples_to_skip > 0 {
+                let remaining = self.sample_len - self.sample_position;
+                let skip = remaining.min(self.samples_to_skip.min(usize::MAX as u64) as usize);
+                self.sample_position += skip;
+                self.samples_to_skip -= skip as u64;
+                continue;
+            }
+            let buf = self.sample_buf.as_ref()?;
+            let sample = buf.samples()[self.sample_position];
+            self.sample_position += 1;
+            return Some(sample);
+        }
     }
 
     fn decode_next_packet(&mut self) -> bool {
@@ -253,23 +366,40 @@ impl Iterator for DecodedAudioSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let (lock, not_empty, not_full) = &*self.state;
+        let mut guard = lock.lock().unwrap();
         loop {
-            if self.sample_position >= self.sample_len && !self.decode_next_packet() {
+            if let Some(sample) = guard.samples.pop_front() {
+                if guard.samples.len() <= self.capacity / 2 {
+                    not_full.notify_one();
+                }
+                self.consumed_samples.fetch_add(1, Ordering::Relaxed);
+                return Some(sample * self.loudness_gain);
+            }
+            if guard.is_eof || guard.is_terminated {
                 return None;
             }
-            if self.samples_to_skip > 0 {
-                let remaining = self.sample_len - self.sample_position;
-                let skip = remaining.min(self.samples_to_skip.min(usize::MAX as u64) as usize);
-                self.sample_position += skip;
-                self.samples_to_skip -= skip as u64;
-                continue;
+            // If the buffer momentarily starves under extreme CPU load, wait up to 5ms
+            let (new_guard, wait_res) = not_empty.wait_timeout(guard, Duration::from_millis(5)).unwrap();
+            guard = new_guard;
+            if wait_res.timed_out() && guard.samples.is_empty() {
+                if guard.is_eof || guard.is_terminated {
+                    return None;
+                }
+                // Yield silence rather than blocking WASAPI or tearing down the stream
+                return Some(0.0);
             }
-            let buf = self.sample_buf.as_ref()?;
-            let sample = buf.samples()[self.sample_position] * self.loudness_gain;
-            self.sample_position += 1;
-            self.consumed_samples.fetch_add(1, Ordering::Relaxed);
-            return Some(sample);
         }
+    }
+}
+
+impl Drop for DecodedAudioSource {
+    fn drop(&mut self) {
+        let (lock, not_empty, not_full) = &*self.state;
+        let mut guard = lock.lock().unwrap();
+        guard.is_terminated = true;
+        not_empty.notify_all();
+        not_full.notify_all();
     }
 }
 
@@ -285,5 +415,39 @@ impl rodio::Source for DecodedAudioSource {
     }
     fn total_duration(&self) -> Option<std::time::Duration> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decoded_audio_source_buffer_state() {
+        let state = Arc::new((
+            Mutex::new(DecodedBufferState {
+                samples: VecDeque::from(vec![0.1, 0.2, 0.3]),
+                is_eof: true,
+                is_terminated: false,
+            }),
+            Condvar::new(),
+            Condvar::new(),
+        ));
+
+        let mut source = DecodedAudioSource {
+            sample_rate: 44100,
+            channels: 2,
+            consumed_samples: Arc::new(AtomicU64::new(0)),
+            loudness_gain: 1.0,
+            state,
+            capacity: 1024,
+            _worker_handle: None,
+        };
+
+        assert_eq!(source.next(), Some(0.1));
+        assert_eq!(source.next(), Some(0.2));
+        assert_eq!(source.next(), Some(0.3));
+        assert_eq!(source.next(), None);
+        assert_eq!(source.consumed_samples().load(Ordering::Relaxed), 3);
     }
 }

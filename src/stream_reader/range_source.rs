@@ -108,6 +108,13 @@ impl AsyncRangeMediaSource {
         thread::Builder::new()
             .name("http-range-prefetch".to_string())
             .spawn(move || {
+                #[cfg(windows)]
+                unsafe {
+                    use windows::Win32::System::Threading::{
+                        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+                    };
+                    let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+                }
                 let mut reader = reader;
                 let mut chunk = vec![0u8; 32 * 1024];
                 // `cursor` is the logical byte position being produced; `reader_pos` is where the
