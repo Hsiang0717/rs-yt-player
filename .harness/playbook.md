@@ -6,7 +6,4 @@
 - Pre-decoded samples must decouple decoding thread from WASAPI output thread.
 
 ## Winning Patterns
-*(To be recorded during epochs)*
-
-## Regression Traps to Avoid
-*(To be recorded during epochs)*
+- `[Epoch 1 - Audio Underrun Fix]`: Decoupled audio packet decoding from rodio's audio callback thread into a dedicated background worker (`audio-decode-worker`) with a 3.0-second pre-decoded PCM ring buffer (`DecodedBufferState`). Elevated Windows thread priorities (`THREAD_PRIORITY_ABOVE_NORMAL`) for both pre-decode worker and HTTP prefetch thread. Added silence padding fallback on extreme CPU spikes to prevent WASAPI teardown. Test suite expanded to 13 passed tests.

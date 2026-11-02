@@ -28,6 +28,8 @@ pub struct DecodedAudioSource {
     loudness_gain: f32,
     state: Arc<(Mutex<DecodedBufferState>, Condvar, Condvar)>,
     capacity: usize,
+    local_buf: Vec<f32>,
+    local_pos: usize,
     _worker_handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -241,9 +243,7 @@ impl DecodedAudioSource {
 
                     chunk.clear();
                     while chunk.len() < 4096 {
-                        if let Some(sample) = internal.next_sample() {
-                            chunk.push(sample);
-                        } else {
+                        if !internal.decode_packet_samples(&mut chunk) {
                             break;
                         }
                     }
@@ -280,29 +280,31 @@ impl DecodedAudioSource {
             loudness_gain: 1.0,
             state,
             capacity,
+            local_buf: Vec::with_capacity(2048),
+            local_pos: 0,
             _worker_handle: worker_handle,
         })
     }
 }
 
 impl InternalAudioDecoder {
-    fn next_sample(&mut self) -> Option<f32> {
-        loop {
-            if self.sample_position >= self.sample_len && !self.decode_next_packet() {
-                return None;
-            }
-            if self.samples_to_skip > 0 {
-                let remaining = self.sample_len - self.sample_position;
-                let skip = remaining.min(self.samples_to_skip.min(usize::MAX as u64) as usize);
-                self.sample_position += skip;
-                self.samples_to_skip -= skip as u64;
-                continue;
-            }
-            let buf = self.sample_buf.as_ref()?;
-            let sample = buf.samples()[self.sample_position];
-            self.sample_position += 1;
-            return Some(sample);
+    fn decode_packet_samples(&mut self, output: &mut Vec<f32>) -> bool {
+        if !self.decode_next_packet() {
+            return false;
         }
+        if let Some(buf) = self.sample_buf.as_ref() {
+            let samples = buf.samples();
+            if self.samples_to_skip > 0 {
+                let skip = (samples.len() as u64).min(self.samples_to_skip) as usize;
+                self.samples_to_skip -= skip as u64;
+                if skip < samples.len() {
+                    output.extend_from_slice(&samples[skip..]);
+                }
+            } else {
+                output.extend_from_slice(samples);
+            }
+        }
+        true
     }
 
     fn decode_next_packet(&mut self) -> bool {
@@ -366,29 +368,46 @@ impl Iterator for DecodedAudioSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.local_pos < self.local_buf.len() {
+            let sample = self.local_buf[self.local_pos];
+            self.local_pos += 1;
+            self.consumed_samples.fetch_add(1, Ordering::Relaxed);
+            return Some(sample * self.loudness_gain);
+        }
+
+        self.local_buf.clear();
+        self.local_pos = 0;
+
         let (lock, not_empty, not_full) = &*self.state;
         let mut guard = lock.lock().unwrap();
         loop {
-            if let Some(sample) = guard.samples.pop_front() {
+            if !guard.samples.is_empty() {
+                let count = guard.samples.len().min(2048);
+                self.local_buf.extend(guard.samples.drain(..count));
                 if guard.samples.len() <= self.capacity / 2 {
                     not_full.notify_one();
                 }
-                self.consumed_samples.fetch_add(1, Ordering::Relaxed);
-                return Some(sample * self.loudness_gain);
+                break;
             }
             if guard.is_eof || guard.is_terminated {
                 return None;
             }
-            // If the buffer momentarily starves under extreme CPU load, wait up to 5ms
-            let (new_guard, wait_res) = not_empty.wait_timeout(guard, Duration::from_millis(5)).unwrap();
+            let (new_guard, wait_res) =
+                not_empty.wait_timeout(guard, Duration::from_millis(100)).unwrap();
             guard = new_guard;
-            if wait_res.timed_out() && guard.samples.is_empty() {
-                if guard.is_eof || guard.is_terminated {
-                    return None;
-                }
-                // Yield silence rather than blocking WASAPI or tearing down the stream
-                return Some(0.0);
+            if wait_res.timed_out() && guard.samples.is_empty() && (guard.is_eof || guard.is_terminated) {
+                return None;
             }
+        }
+        drop(guard);
+
+        if self.local_pos < self.local_buf.len() {
+            let sample = self.local_buf[self.local_pos];
+            self.local_pos += 1;
+            self.consumed_samples.fetch_add(1, Ordering::Relaxed);
+            Some(sample * self.loudness_gain)
+        } else {
+            None
         }
     }
 }
@@ -441,6 +460,8 @@ mod tests {
             loudness_gain: 1.0,
             state,
             capacity: 1024,
+            local_buf: Vec::new(),
+            local_pos: 0,
             _worker_handle: None,
         };
 
