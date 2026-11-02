@@ -204,7 +204,7 @@ impl DecodedAudioSource {
             samples_to_skip,
         };
 
-        let capacity = ((sample_rate as usize * channels as usize) * 3).max(64 * 1024);
+        let capacity = ((sample_rate as usize * channels as usize) * 12).max(256 * 1024);
         let state = Arc::new((
             Mutex::new(DecodedBufferState {
                 samples: VecDeque::with_capacity(capacity.min(64 * 1024)),

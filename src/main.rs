@@ -68,7 +68,11 @@ async fn main() -> Result<()> {
     #[cfg(target_os = "windows")]
     unsafe {
         use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, SetPriorityClass, ABOVE_NORMAL_PRIORITY_CLASS,
+        };
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let _ = SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
     }
 
     let tray = match SystemTray::new() {
