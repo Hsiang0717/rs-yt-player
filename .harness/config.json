@@ -1,0 +1,27 @@
+{
+  "project_name": "rs-yt-player",
+  "version": "0.1.0",
+  "hyperparameters": {
+    "max_epochs": 4,
+    "patience": 2,
+    "target_loss": 0.05,
+    "learning_rate": {
+      "max_lines_changed_per_epoch": 120,
+      "max_files_touched_per_epoch": 3
+    }
+  },
+  "loss_weights": {
+    "test_failure_rate": 0.70,
+    "latency_penalty": 0.20,
+    "diff_complexity_penalty": 0.10
+  },
+  "constraints": {
+    "frozen_interfaces": [
+      "src/player.rs:AudioPlayer::play_stream_from_with_headers",
+      "src/player.rs:AudioPlayer::seek_to",
+      "src/player.rs:AudioPlayer::pause",
+      "src/player.rs:AudioPlayer::play"
+    ],
+    "timeout_seconds_per_run": 60
+  }
+}
