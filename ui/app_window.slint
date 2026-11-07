@@ -46,12 +46,11 @@ export component AppWindow inherits Window {
     always-on-top: root.pinned_on_top;
     in-out property <bool> autoplay_enabled: true;
     in-out property <string> sleep_timer_label: "";
-    in-out property <string> panel_tab: "QUEUE";
+    in-out property <string> panel_tab: "PLAYLIST";
     in-out property <string> panel_message: "";
     in-out property <[TrackRow]> search_results: [];
     in-out property <[TrackRow]> queue_items: [];
     in-out property <[TrackRow]> favorite_items: [];
-    in-out property <[TrackRow]> history_items: [];
     in-out property <bool> shuffle_enabled: false;
     in-out property <string> repeat_mode_label: "REPEAT OFF";
     in-out property <bool> can_retry: false;
@@ -72,7 +71,6 @@ export component AppWindow inherits Window {
     callback play_search_result(string);
     callback enqueue_search_result(string);
     callback play_next_in_queue(string);
-    callback play_all(string);
     callback enqueue_all(string);
     callback toggle_search_favorite(string);
     callback play_queue_item(int);
@@ -82,8 +80,6 @@ export component AppWindow inherits Window {
     callback clear_queue();
     callback play_favorite(string);
     callback remove_favorite(string);
-    callback play_history(string);
-    callback favorite_history(string);
     callback cycle_repeat_mode();
     callback toggle_shuffle();
     callback toggle_autoplay();
@@ -220,15 +216,14 @@ export component AppWindow inherits Window {
             if root.queue_expanded: PlaylistDrawerView {
                 panel_tab: root.panel_tab;
                 panel_message: root.panel_message;
+                is_loading: root.is_loading;
                 search_results: root.search_results;
                 queue_items: root.queue_items;
                 favorite_items: root.favorite_items;
-                history_items: root.history_items;
 
                 background_clicked => { title_bar.clear_search_focus(); }
                 select_panel_tab(tab) => { root.select_panel_tab(tab); }
                 clear_queue => { root.clear_queue(); }
-                play_all(tab) => { root.play_all(tab); }
                 enqueue_all(tab) => { root.enqueue_all(tab); }
 
                 play_search_result(k) => { root.play_search_result(k); }
@@ -243,9 +238,6 @@ export component AppWindow inherits Window {
 
                 play_favorite(k) => { root.play_favorite(k); }
                 remove_favorite(k) => { root.remove_favorite(k); }
-
-                play_history(k) => { root.play_history(k); }
-                favorite_history(k) => { root.favorite_history(k); }
             }
         }
     }

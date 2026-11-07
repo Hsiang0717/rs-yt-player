@@ -15,7 +15,7 @@ export component InteractiveProgressBar {
     track := Rectangle {
         width: 100%;
         y: (parent.height - self.height) / 2;
-        height: touch.has-hover || root.is_scrubbing ? 6px : 4px;
+        height: root.enabled && (touch.has-hover || root.is_scrubbing) ? 6px : 4px;
         background: Theme.track_bg;
         border-radius: self.height / 2;
         animate height { duration: 80ms; }
@@ -35,7 +35,7 @@ export component InteractiveProgressBar {
             y: 0;
             width: parent.width * Math.max(0.0, Math.min(1.0, root.ratio));
             height: parent.height;
-            background: touch.has-hover || root.is_scrubbing ? Theme.accent_primary_active : Theme.accent_primary;
+            background: root.enabled && (touch.has-hover || root.is_scrubbing) ? Theme.accent_primary_active : Theme.accent_primary;
             border-radius: self.height / 2;
             animate background { duration: 80ms; }
         }
@@ -43,10 +43,10 @@ export component InteractiveProgressBar {
         thumb := Rectangle {
             x: Math.max(0px, Math.min(parent.width - self.width, parent.width * Math.max(0.0, Math.min(1.0, root.ratio)) - (self.width / 2)));
             y: (parent.height - self.height) / 2;
-            width: touch.has-hover || root.is_scrubbing ? 14px : 10px;
+            width: root.enabled && (touch.has-hover || root.is_scrubbing) ? 14px : 10px;
             height: self.width;
             border-radius: self.width / 2;
-            background: Theme.text_primary;
+            background: root.enabled ? Theme.text_primary : Theme.text_muted;
             border-width: 1px;
             border-color: Theme.bg;
             animate width { duration: 80ms; }

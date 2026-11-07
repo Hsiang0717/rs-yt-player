@@ -23,6 +23,8 @@ export component IconButton inherits Rectangle {
         source: root.icon;
         width: root.icon_size;
         height: root.icon_size;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
         colorize: !root.enabled ? Theme.border : (root.active ? root.active_color : (touch.has-hover ? root.hover_color : root.default_color));
         animate colorize { duration: 120ms; }
     }

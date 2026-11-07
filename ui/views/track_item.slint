@@ -6,7 +6,9 @@ export component TrackItemView inherits Rectangle {
     in property <TrackRow> item;
     in property <int> index: 0;
     in property <int> total_count: 1;
-    in property <string> mode: "SEARCH"; // "SEARCH", "QUEUE", "SAVED", "HISTORY"
+    in property <bool> is_loading: false;
+    in property <string> mode: "SEARCH"; // "SEARCH", "PLAYLIST", "SAVED"
+    property <bool> can_play_row: !root.is_loading && !(root.mode == "PLAYLIST" && root.item.is_current);
 
     callback play();
     callback play_next();
@@ -17,7 +19,7 @@ export component TrackItemView inherits Rectangle {
     callback move_down();
 
     height: 44px;
-    background: root.item.is_current ? Theme.surface_active : (item_touch.has-hover ? Theme.surface_hover : (Math.mod(root.index, 2) == 0 ? Theme.surface : Theme.surface_alt));
+    background: root.item.is_current ? Theme.surface_active : ((root.can_play_row && item_touch.has-hover) ? Theme.surface_hover : (Math.mod(root.index, 2) == 0 ? Theme.surface : Theme.surface_alt));
     border-radius: 6px;
     border-width: 1px;
     border-color: root.item.is_current ? Theme.border : transparent;
@@ -98,163 +100,106 @@ export component TrackItemView inherits Rectangle {
             }
 
             item_touch := TouchArea {
-                mouse-cursor: pointer;
+                enabled: root.can_play_row;
+                mouse-cursor: root.can_play_row ? pointer : default;
                 clicked => { root.play(); }
             }
         }
 
-        // 3. 右側固定時長 (支援 HH:MM:SS 長音訊格式不溢位)
-        Text {
-            text: root.item.duration;
-            color: Theme.text_muted;
-            font-size: 11px;
-            vertical-alignment: center;
-            min-width: 52px;
-            horizontal-alignment: right;
-        }
-
-        // 4. 右側操作按鈕區
-        if root.mode == "SEARCH": HorizontalLayout {
-            spacing: 4px;
+        // 3. 右側資訊與操作區 (垂直置中並靠右緊密對齊，時長與按鈕維持同一水平線)
+        VerticalLayout {
             alignment: center;
 
-            IconButton {
-                width: 24px;
-                height: 24px;
-                icon: @image-url("../icons/play-next.svg");
-                icon_size: 13px;
-                default_color: Theme.text_secondary;
-                hover_color: Theme.accent_primary;
-                clicked => { root.play_next(); }
-            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
 
-            IconButton {
-                width: 24px;
-                height: 24px;
-                icon: @image-url("../icons/plus.svg");
-                icon_size: 13px;
-                default_color: Theme.accent_primary;
-                hover_color: Theme.accent_primary_hover;
-                clicked => { root.enqueue(); }
-            }
+                Text {
+                    text: root.item.duration;
+                    color: Theme.text_muted;
+                    font-size: 11px;
+                    min-width: 36px;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                }
 
-            IconButton {
-                width: 24px;
-                height: 24px;
-                icon: root.item.is_favorite ? @image-url("../icons/heart-filled.svg") : @image-url("../icons/heart.svg");
-                icon_size: 13px;
-                active: root.item.is_favorite;
-                active_color: Theme.accent_gold;
-                default_color: Theme.text_secondary;
-                clicked => { root.toggle_fav(); }
-            }
-        }
+                if root.mode == "SEARCH": HorizontalLayout {
+                    spacing: 4px;
+                    alignment: center;
 
-        if root.mode == "HISTORY": HorizontalLayout {
-            spacing: 4px;
-            alignment: center;
+                    IconButton {
+                        width: 24px;
+                        height: 24px;
+                        icon: @image-url("../icons/plus.svg");
+                        icon_size: 13px;
+                        default_color: Theme.accent_primary;
+                        hover_color: Theme.accent_primary_hover;
+                        clicked => { root.enqueue(); }
+                    }
 
-            IconButton {
-                width: 24px;
-                height: 24px;
-                icon: @image-url("../icons/play-next.svg");
-                icon_size: 13px;
-                default_color: Theme.text_secondary;
-                hover_color: Theme.accent_primary;
-                clicked => { root.play_next(); }
-            }
+                    IconButton {
+                        width: 24px;
+                        height: 24px;
+                        icon: root.item.is_favorite ? @image-url("../icons/heart-filled.svg") : @image-url("../icons/heart.svg");
+                        icon_size: 13px;
+                        active: root.item.is_favorite;
+                        active_color: Theme.accent_gold;
+                        default_color: Theme.text_secondary;
+                        clicked => { root.toggle_fav(); }
+                    }
+                }
 
-            IconButton {
-                width: 24px;
-                height: 24px;
-                icon: @image-url("../icons/plus.svg");
-                icon_size: 13px;
-                default_color: Theme.accent_primary;
-                hover_color: Theme.accent_primary_hover;
-                clicked => { root.enqueue(); }
-            }
+                if root.mode == "SAVED": HorizontalLayout {
+                    spacing: 4px;
+                    alignment: center;
 
-            IconButton {
-                width: 24px;
-                height: 24px;
-                icon: root.item.is_favorite ? @image-url("../icons/heart-filled.svg") : @image-url("../icons/heart.svg");
-                icon_size: 13px;
-                active: root.item.is_favorite;
-                active_color: Theme.accent_gold;
-                default_color: Theme.text_secondary;
-                clicked => { root.toggle_fav(); }
-            }
-        }
+                    IconButton {
+                        width: 24px;
+                        height: 24px;
+                        icon: @image-url("../icons/plus.svg");
+                        icon_size: 13px;
+                        default_color: Theme.accent_primary;
+                        hover_color: Theme.accent_primary_hover;
+                        clicked => { root.enqueue(); }
+                    }
 
-        if root.mode == "SAVED": HorizontalLayout {
-            spacing: 4px;
-            alignment: center;
+                    IconButton {
+                        width: 24px;
+                        height: 24px;
+                        icon: @image-url("../icons/heart-filled.svg");
+                        icon_size: 13px;
+                        active: true;
+                        active_color: Theme.accent_gold;
+                        hover_color: Theme.accent_gold_hover;
+                        clicked => { root.remove(); }
+                    }
+                }
 
-            IconButton {
-                width: 24px;
-                height: 24px;
-                icon: @image-url("../icons/play-next.svg");
-                icon_size: 13px;
-                default_color: Theme.text_secondary;
-                hover_color: Theme.accent_primary;
-                clicked => { root.play_next(); }
-            }
+                if root.mode == "PLAYLIST": HorizontalLayout {
+                    spacing: 4px;
+                    alignment: center;
 
-            IconButton {
-                width: 24px;
-                height: 24px;
-                icon: @image-url("../icons/plus.svg");
-                icon_size: 13px;
-                default_color: Theme.accent_primary;
-                hover_color: Theme.accent_primary_hover;
-                clicked => { root.enqueue(); }
-            }
+                    IconButton {
+                        width: 24px;
+                        height: 24px;
+                        icon: root.item.is_favorite ? @image-url("../icons/heart-filled.svg") : @image-url("../icons/heart.svg");
+                        icon_size: 13px;
+                        active: root.item.is_favorite;
+                        active_color: Theme.accent_gold;
+                        default_color: Theme.text_secondary;
+                        clicked => { root.toggle_fav(); }
+                    }
 
-            IconButton {
-                width: 24px;
-                height: 24px;
-                icon: @image-url("../icons/close.svg");
-                icon_size: 13px;
-                default_color: Theme.accent_gold;
-                hover_color: Theme.accent_gold_hover;
-                clicked => { root.remove(); }
-            }
-        }
-
-        if root.mode == "QUEUE": HorizontalLayout {
-            spacing: 2px;
-            alignment: center;
-
-            IconButton {
-                width: 22px;
-                height: 24px;
-                icon: @image-url("../icons/chevron-up.svg");
-                icon_size: 13px;
-                enabled: root.index > 0;
-                default_color: Theme.text_secondary;
-                hover_color: Theme.accent_primary;
-                clicked => { root.move_up(); }
-            }
-
-            IconButton {
-                width: 22px;
-                height: 24px;
-                icon: @image-url("../icons/chevron-down.svg");
-                icon_size: 13px;
-                enabled: root.index + 1 < root.total_count;
-                default_color: Theme.text_secondary;
-                hover_color: Theme.accent_primary;
-                clicked => { root.move_down(); }
-            }
-
-            IconButton {
-                width: 24px;
-                height: 24px;
-                icon: @image-url("../icons/close.svg");
-                icon_size: 13px;
-                default_color: Theme.accent_danger;
-                hover_color: #E09E8A;
-                clicked => { root.remove(); }
+                    IconButton {
+                        width: 24px;
+                        height: 24px;
+                        icon: @image-url("../icons/close.svg");
+                        icon_size: 13px;
+                        default_color: Theme.accent_danger;
+                        hover_color: #E09E8A;
+                        clicked => { root.remove(); }
+                    }
+                }
             }
         }
     }

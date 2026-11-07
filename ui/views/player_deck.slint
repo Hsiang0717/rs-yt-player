@@ -134,13 +134,6 @@ export component PlayerDeckView inherits Rectangle {
                         if root.is_loading: LoadingSpinner {
                             loading: root.is_loading;
                         }
-
-                        Text {
-                            text: root.track_status;
-                            font-size: 10px;
-                            font-weight: 600;
-                            color: root.track_status == "ERROR" ? Theme.accent_danger : (root.is_loading || root.track_status == "BUFFERING" || root.track_status == "SEARCHING" ? Theme.accent_gold : (root.is_playing ? Theme.accent_primary : Theme.text_muted));
-                        }
                     }
                 }
 
@@ -148,71 +141,6 @@ export component PlayerDeckView inherits Rectangle {
                 HorizontalLayout {
                     spacing: 5px;
                     alignment: start;
-
-                    // Autoplay Toggle Badge
-                    Rectangle {
-                        height: 22px;
-                        border-radius: 4px;
-                        background: root.autoplay_enabled ? Theme.surface_active : Theme.surface;
-                        border-width: 1px;
-                        border-color: root.autoplay_enabled ? Theme.accent_primary : Theme.border;
-
-                        HorizontalLayout {
-                            padding-left: 5px;
-                            padding-right: 5px;
-                            alignment: center;
-
-                            Text {
-                                text: "AUTO";
-                                font-size: 9px;
-                                font-weight: 700;
-                                color: root.autoplay_enabled ? Theme.accent_primary : Theme.text_muted;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.toggle_autoplay(); }
-                        }
-                    }
-
-                    // Sleep Timer Badge
-                    Rectangle {
-                        height: 22px;
-                        border-radius: 4px;
-                        background: root.sleep_timer_label != "" ? Theme.surface_active : Theme.surface;
-                        border-width: 1px;
-                        border-color: root.sleep_timer_label != "" ? Theme.accent_gold : Theme.border;
-
-                        HorizontalLayout {
-                            padding-left: 5px;
-                            padding-right: 5px;
-                            spacing: 3px;
-                            alignment: center;
-
-                            Image {
-                                source: @image-url("../icons/clock.svg");
-                                width: 11px;
-                                height: 11px;
-                                colorize: root.sleep_timer_label != "" ? Theme.accent_gold : Theme.text_muted;
-                                y: (parent.height - self.height) / 2;
-                            }
-
-                            if root.sleep_timer_label != "": Text {
-                                text: root.sleep_timer_label;
-                                font-size: 9px;
-                                font-weight: 700;
-                                color: Theme.accent_gold;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.cycle_sleep_timer(); }
-                        }
-                    }
 
                     // Codec Badge (AAC / OPUS)
                     Rectangle {
@@ -288,7 +216,7 @@ export component PlayerDeckView inherits Rectangle {
                     ratio <=> root.progress_ratio;
                     buffer_ratio <=> root.buffer_ratio;
                     is_scrubbing <=> root.is_scrubbing;
-                    enabled: root.has_active_track;
+                    enabled: root.has_active_track && !root.is_loading;
                     user_scrub(r) => { root.on_user_scrub(r); }
                     user_seek(r) => { root.on_user_seek(r); }
                 }
@@ -324,6 +252,7 @@ export component PlayerDeckView inherits Rectangle {
                     IconButton {
                         icon: @image-url("../icons/prev.svg");
                         icon_size: 15px;
+                        enabled: !root.is_loading;
                         default_color: Theme.text_primary;
                         clicked => { root.play_previous(); }
                     }
@@ -332,7 +261,8 @@ export component PlayerDeckView inherits Rectangle {
                         width: 44px;
                         height: 32px;
                         border-radius: 8px;
-                        background: play_touch.has-hover ? Theme.accent_primary_hover : Theme.accent_primary;
+                        opacity: root.is_loading ? 0.55 : 1.0;
+                        background: !root.is_loading && play_touch.has-hover ? Theme.accent_primary_hover : Theme.accent_primary;
                         animate background { duration: 100ms; }
 
                         Image {
@@ -345,7 +275,8 @@ export component PlayerDeckView inherits Rectangle {
                         }
 
                         play_touch := TouchArea {
-                            mouse-cursor: pointer;
+                            enabled: !root.is_loading;
+                            mouse-cursor: root.is_loading ? default : pointer;
                             clicked => { root.toggle_play_pause(); }
                         }
                     }
@@ -353,6 +284,7 @@ export component PlayerDeckView inherits Rectangle {
                     IconButton {
                         icon: @image-url("../icons/next.svg");
                         icon_size: 15px;
+                        enabled: !root.is_loading;
                         default_color: Theme.text_primary;
                         clicked => { root.play_next(); }
                     }
@@ -434,21 +366,19 @@ export component PlayerDeckView inherits Rectangle {
                         height: 28px;
                         y: (parent.height - self.height) / 2;
                         border-radius: 6px;
-                        background: chevron_touch.has-hover ? Theme.surface_hover : transparent;
+                        background: queue_touch.has-hover ? Theme.surface_hover : (root.queue_expanded ? Theme.surface_active : transparent);
                         animate background { duration: 100ms; }
 
                         Image {
-                            source: @image-url("../icons/chevron-down.svg");
-                            width: 15px;
-                            height: 15px;
+                            source: @image-url("../icons/playlist.svg");
+                            width: 16px;
+                            height: 16px;
                             colorize: root.queue_expanded ? Theme.accent_primary : Theme.text_muted;
-                            transform-rotation: root.queue_expanded ? 180deg : 0deg;
-                            animate transform-rotation { duration: 200ms; easing: ease-in-out; }
                             x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
                         }
 
-                        chevron_touch := TouchArea {
+                        queue_touch := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.toggle_queue(); }
                         }

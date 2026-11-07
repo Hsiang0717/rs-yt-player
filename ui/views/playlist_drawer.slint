@@ -5,17 +5,16 @@ import { IconButton } from "../components/icon_button.slint";
 import { TrackItemView } from "track_item.slint";
 
 export component PlaylistDrawerView inherits Rectangle {
-    in property <string> panel_tab: "QUEUE";
+    in property <string> panel_tab: "PLAYLIST";
     in property <string> panel_message: "";
+    in property <bool> is_loading: false;
     in property <[TrackRow]> search_results: [];
     in property <[TrackRow]> queue_items: [];
     in property <[TrackRow]> favorite_items: [];
-    in property <[TrackRow]> history_items: [];
 
     callback background_clicked();
     callback select_panel_tab(string);
     callback clear_queue();
-    callback play_all(string);
     callback enqueue_all(string);
 
     callback play_search_result(string);
@@ -30,9 +29,6 @@ export component PlaylistDrawerView inherits Rectangle {
 
     callback play_favorite(string);
     callback remove_favorite(string);
-
-    callback play_history(string);
-    callback favorite_history(string);
 
     vertical-stretch: 1;
     background: Theme.panel_bg;
@@ -55,8 +51,8 @@ export component PlaylistDrawerView inherits Rectangle {
             spacing: 6px;
             alignment: start;
 
-            for tab[index] in ["SEARCH", "QUEUE", "SAVED", "HISTORY"]: Rectangle {
-                width: 72px;
+            for tab[index] in ["SEARCH", "PLAYLIST", "SAVED"]: Rectangle {
+                width: 76px;
                 height: 26px;
                 border-radius: 6px;
                 background: root.panel_tab == tab ? Theme.accent_primary : (tab_touch.has-hover ? Theme.surface_hover : Theme.surface);
@@ -81,65 +77,24 @@ export component PlaylistDrawerView inherits Rectangle {
 
             Rectangle { horizontal-stretch: 1; }
 
-            // Batch Actions: Play All & Queue All for SEARCH / SAVED / HISTORY
+            // Add All to Playlist Icon Button (for SEARCH / SAVED)
             if (root.panel_tab == "SEARCH" && root.search_results.length > 0) ||
-               (root.panel_tab == "SAVED" && root.favorite_items.length > 0) ||
-               (root.panel_tab == "HISTORY" && root.history_items.length > 0): HorizontalLayout {
-                spacing: 5px;
-
-                Rectangle {
-                    width: 64px;
-                    height: 24px;
-                    y: (parent.height - self.height) / 2;
-                    border-radius: 5px;
-                    background: play_all_touch.has-hover ? Theme.accent_primary_hover : Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.accent_primary;
-
-                    Text {
-                        text: "PLAY ALL";
-                        color: play_all_touch.has-hover ? Theme.text_dark : Theme.accent_primary;
-                        font-size: 9.5px;
-                        font-weight: 700;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-
-                    play_all_touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.play_all(root.panel_tab); }
-                    }
-                }
-
-                Rectangle {
-                    width: 68px;
-                    height: 24px;
-                    y: (parent.height - self.height) / 2;
-                    border-radius: 5px;
-                    background: queue_all_touch.has-hover ? Theme.surface_hover : Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.border;
-
-                    Text {
-                        text: "+ QUEUE ALL";
-                        color: Theme.text_primary;
-                        font-size: 9.5px;
-                        font-weight: 600;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-
-                    queue_all_touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.enqueue_all(root.panel_tab); }
-                    }
-                }
-            }
-
-            // Clear Upcoming Queue Button
-            if root.panel_tab == "QUEUE" && root.queue_items.length > 0: IconButton {
+               (root.panel_tab == "SAVED" && root.favorite_items.length > 0): IconButton {
                 width: 26px;
                 height: 26px;
+                y: (parent.height - self.height) / 2;
+                icon: @image-url("../icons/playlist-plus.svg");
+                icon_size: 15px;
+                default_color: Theme.accent_primary;
+                hover_color: Theme.accent_primary_hover;
+                clicked => { root.enqueue_all(root.panel_tab); }
+            }
+
+            // Clear Playlist Button
+            if root.panel_tab == "PLAYLIST" && root.queue_items.length > 0: IconButton {
+                width: 26px;
+                height: 26px;
+                y: (parent.height - self.height) / 2;
                 icon: @image-url("../icons/trash.svg");
                 icon_size: 14px;
                 default_color: Theme.accent_danger;
@@ -163,6 +118,7 @@ export component PlaylistDrawerView inherits Rectangle {
                 item: item;
                 index: index;
                 total_count: root.search_results.length;
+                is_loading: root.is_loading;
                 mode: "SEARCH";
                 play => { root.play_search_result(item.key); }
                 play_next => { root.play_next_track(item.key); }
@@ -180,23 +136,25 @@ export component PlaylistDrawerView inherits Rectangle {
             vertical-stretch: 1;
         }
 
-        // --- Upcoming Queue ---
-        if root.panel_tab == "QUEUE" && root.queue_items.length > 0: ListView {
+        // --- Playlist ---
+        if root.panel_tab == "PLAYLIST" && root.queue_items.length > 0: ListView {
             vertical-stretch: 1;
             for item[index] in root.queue_items: TrackItemView {
                 item: item;
                 index: index;
                 total_count: root.queue_items.length;
-                mode: "QUEUE";
+                is_loading: root.is_loading;
+                mode: "PLAYLIST";
                 play => { root.play_queue_item(index); }
                 remove => { root.remove_queue_item(index); }
+                toggle_fav => { root.toggle_search_favorite(item.key); }
                 move_up => { root.move_queue_item_up(index); }
                 move_down => { root.move_queue_item_down(index); }
             }
         }
 
-        if root.panel_tab == "QUEUE" && root.queue_items.length == 0: Text {
-            text: "Queue is empty · add songs from Search or Saved.";
+        if root.panel_tab == "PLAYLIST" && root.queue_items.length == 0: Text {
+            text: "Playlist is empty · add songs from Search or Saved.";
             color: Theme.text_secondary;
             font-size: 11.5px;
             horizontal-alignment: center;
@@ -211,6 +169,7 @@ export component PlaylistDrawerView inherits Rectangle {
                 item: item;
                 index: index;
                 total_count: root.favorite_items.length;
+                is_loading: root.is_loading;
                 mode: "SAVED";
                 play => { root.play_favorite(item.key); }
                 play_next => { root.play_next_track(item.key); }
@@ -221,30 +180,6 @@ export component PlaylistDrawerView inherits Rectangle {
 
         if root.panel_tab == "SAVED" && root.favorite_items.length == 0: Text {
             text: "No favorites saved yet.";
-            color: Theme.text_secondary;
-            font-size: 11.5px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-            vertical-stretch: 1;
-        }
-
-        // --- Recently Played History ---
-        if root.panel_tab == "HISTORY" && root.history_items.length > 0: ListView {
-            vertical-stretch: 1;
-            for item[index] in root.history_items: TrackItemView {
-                item: item;
-                index: index;
-                total_count: root.history_items.length;
-                mode: "HISTORY";
-                play => { root.play_history(item.key); }
-                play_next => { root.play_next_track(item.key); }
-                enqueue => { root.enqueue_track(item.key); }
-                toggle_fav => { root.favorite_history(item.key); }
-            }
-        }
-
-        if root.panel_tab == "HISTORY" && root.history_items.length == 0: Text {
-            text: "No recently played tracks yet.";
             color: Theme.text_secondary;
             font-size: 11.5px;
             horizontal-alignment: center;
