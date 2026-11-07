@@ -88,11 +88,11 @@ pub fn bind_queue_controls(
     let library_for_remove = ctx.library.clone();
     let ui_weak_remove = ctx.ui_weak.clone();
     app.on_remove_queue_item(move |index| {
-        if queue_for_remove.remove_at(index as usize).is_some() {
+        if queue_for_remove.remove_playlist_item(index as usize).is_some() {
             library_for_remove.save_queue(queue_for_remove.to_track_records());
             if let Some(ui) = ui_weak_remove.upgrade() {
                 ui.set_queue_items(queue_items_model(&queue_for_remove, &library_for_remove));
-                ui.set_panel_message(slint::SharedString::from("Removed from queue"));
+                ui.set_panel_message(slint::SharedString::from("Removed from playlist"));
             }
         }
     });
@@ -102,7 +102,7 @@ pub fn bind_queue_controls(
     let ui_weak_move_up = ctx.ui_weak.clone();
     app.on_move_queue_item_up(move |index| {
         let index = index as usize;
-        if index > 0 && queue_for_move_up.move_item(index, index - 1) {
+        if index > 0 && queue_for_move_up.move_playlist_item(index, index - 1) {
             library_for_move_up.save_queue(queue_for_move_up.to_track_records());
             if let Some(ui) = ui_weak_move_up.upgrade() {
                 ui.set_queue_items(queue_items_model(&queue_for_move_up, &library_for_move_up));
@@ -115,7 +115,7 @@ pub fn bind_queue_controls(
     let ui_weak_move_down = ctx.ui_weak.clone();
     app.on_move_queue_item_down(move |index| {
         let index = index as usize;
-        if queue_for_move_down.move_item(index, index + 1) {
+        if queue_for_move_down.move_playlist_item(index, index + 1) {
             library_for_move_down.save_queue(queue_for_move_down.to_track_records());
             if let Some(ui) = ui_weak_move_down.upgrade() {
                 ui.set_queue_items(queue_items_model(
@@ -130,22 +130,36 @@ pub fn bind_queue_controls(
     let library_for_clear = ctx.library.clone();
     let ui_weak_clear = ctx.ui_weak.clone();
     app.on_clear_queue(move || {
-        queue_for_clear.clear_upcoming();
+        queue_for_clear.clear();
         library_for_clear.save_queue(Vec::new());
         if let Some(ui) = ui_weak_clear.upgrade() {
             ui.set_queue_items(queue_items_model(&queue_for_clear, &library_for_clear));
-            ui.set_panel_message(slint::SharedString::from("Queue cleared"));
+            ui.set_panel_message(slint::SharedString::from("Playlist cleared"));
         }
     });
 
     let ctx_for_item = ctx;
     let advance_for_item = is_auto_advancing;
+    let last_play_click = Arc::new(Mutex::new(
+        std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(10))
+            .unwrap_or_else(std::time::Instant::now),
+    ));
     app.on_play_queue_item(move |index| {
+        let mut last_click = last_play_click.lock().unwrap();
+        let now = std::time::Instant::now();
+        if now.duration_since(*last_click).as_millis() < 400 {
+            return;
+        }
+        *last_click = now;
+        drop(last_click);
+
         let mut advancing = advance_for_item.lock().unwrap();
         if *advancing {
             return;
         }
-        let Some((query, preloaded)) = ctx_for_item.queue.pop_at(index as usize) else {
+
+        let Some((query, preloaded)) = ctx_for_item.queue.select_playlist_item(index as usize) else {
             return;
         };
         *advancing = true;
@@ -172,6 +186,15 @@ pub fn bind_queue_controls(
         let abort_handle = ctx_for_item.loading_abort.clone();
 
         let join_handle = tokio::spawn(async move {
+            struct ResetGuard(Arc<Mutex<bool>>);
+            impl Drop for ResetGuard {
+                fn drop(&mut self) {
+                    if let Ok(mut g) = self.0.lock() {
+                        *g = false;
+                    }
+                }
+            }
+            let _guard = ResetGuard(advance);
             if let Some(preloaded) = preloaded {
                 let cache_path = library.cover_path(&preloaded.meta.id);
                 let cover_path = cache_path
@@ -197,7 +220,6 @@ pub fn bind_queue_controls(
                 )
                 .await;
             }
-            *advance.lock().unwrap() = false;
         });
 
         if let Ok(mut guard) = abort_handle.lock()

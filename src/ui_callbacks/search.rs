@@ -26,6 +26,7 @@ fn find_track_record(
     key: &str,
     search_records: &Arc<Mutex<Vec<TrackRecord>>>,
     library: &crate::library::LibraryStore,
+    queue: &crate::queue::PlayQueue,
 ) -> Option<TrackRecord> {
     let id = query_video_id(key);
     search_records
@@ -35,6 +36,19 @@ fn find_track_record(
         .find(|r| r.video_url() == key || r.id == id)
         .cloned()
         .or_else(|| library.find_track(&id))
+        .or_else(|| {
+            queue
+                .all_playlist_items()
+                .into_iter()
+                .find(|item| query_video_id(&item.query) == id || item.query == key)
+                .map(|item| TrackRecord {
+                    id: query_video_id(&item.query),
+                    title: item.title,
+                    artist: item.artist,
+                    duration_secs: item.duration_secs,
+                    thumbnail_url: item.thumbnail_url,
+                })
+        })
 }
 
 pub fn bind_search_controls(
@@ -207,7 +221,7 @@ pub fn bind_search_controls(
     app.on_enqueue_search_result(move |key| {
         let key = key.to_string();
         let Some(record) =
-            find_track_record(&key, &search_records_for_add, &library_for_add)
+            find_track_record(&key, &search_records_for_add, &library_for_add, &queue_for_add)
         else {
             return;
         };
@@ -223,7 +237,7 @@ pub fn bind_search_controls(
         if let Some(ui) = ui_weak_add.upgrade() {
             ui.set_queue_items(queue_items_model(&queue_for_add, &library_for_add));
             ui.set_panel_message(slint::SharedString::from(format!(
-                "Added \"{}\" to queue",
+                "Added \"{}\" to playlist",
                 record.title
             )));
         }
@@ -237,7 +251,7 @@ pub fn bind_search_controls(
     app.on_play_next_in_queue(move |key| {
         let key = key.to_string();
         let Some(record) =
-            find_track_record(&key, &search_records_for_next, &library_for_next)
+            find_track_record(&key, &search_records_for_next, &library_for_next, &queue_for_next)
         else {
             return;
         };
@@ -261,14 +275,15 @@ pub fn bind_search_controls(
 
     // on_toggle_search_favorite
     let library_for_toggle = ctx.library.clone();
+    let queue_for_toggle = ctx.queue.clone();
     let search_records_for_fav = Arc::clone(&search_records);
     let ui_weak_fav = ctx.ui_weak.clone();
     app.on_toggle_search_favorite(move |key| {
         let key = key.to_string();
         if let Some(record) =
-            find_track_record(&key, &search_records_for_fav, &library_for_toggle)
+            find_track_record(&key, &search_records_for_fav, &library_for_toggle, &queue_for_toggle)
         {
-            library_for_toggle.toggle_favorite(record);
+            let is_fav = library_for_toggle.toggle_favorite(record);
             if let Some(ui) = ui_weak_fav.upgrade() {
                 let results = search_records_for_fav.lock().unwrap().clone();
                 let curr_key = ui.get_current_track_key();
@@ -278,13 +293,47 @@ pub fn bind_search_controls(
                     &library_for_toggle,
                     Some(&curr_key),
                 ));
-                ui.set_panel_message(slint::SharedString::from("Favorites updated"));
+                ui.set_queue_items(queue_items_model(&queue_for_toggle, &library_for_toggle));
+                if curr_key == key || curr_key.contains(&query_video_id(&key)) {
+                    ui.set_current_is_favorite(is_fav);
+                }
+                ui.set_panel_message(slint::SharedString::from(if is_fav {
+                    "Added to favorites"
+                } else {
+                    "Removed from favorites"
+                }));
             }
         }
     });
 
     let ctx_for_play = ctx;
+    let search_records_for_play = search_records;
     app.on_play_search_result(move |key| {
-        ctx_for_play.start_track(key.to_string(), false);
+        let key_str = key.to_string();
+        if let Some(record) = find_track_record(
+            &key_str,
+            &search_records_for_play,
+            &ctx_for_play.library,
+            &ctx_for_play.queue,
+        ) {
+            ctx_for_play.queue.set_track_info(
+                &key_str,
+                record.title,
+                record.artist,
+                record.duration_secs,
+                record.thumbnail_url,
+            );
+            ctx_for_play.queue.record_current(key_str.clone());
+            ctx_for_play
+                .library
+                .save_queue(ctx_for_play.queue.to_track_records());
+            if let Some(ui) = ctx_for_play.ui_weak.upgrade() {
+                ui.set_queue_items(queue_items_model(
+                    &ctx_for_play.queue,
+                    &ctx_for_play.library,
+                ));
+            }
+        }
+        ctx_for_play.start_track(key_str, false);
     });
 }

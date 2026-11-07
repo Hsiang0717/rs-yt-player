@@ -152,11 +152,6 @@ async fn main() -> Result<()> {
         &library,
         current_key.as_deref(),
     ));
-    app.set_history_items(records_model(
-        library.recent(),
-        &library,
-        current_key.as_deref(),
-    ));
     app.set_queue_items(queue_items_model(&play_queue, &library));
 
     if library.queue_expanded() {

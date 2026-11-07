@@ -1,12 +1,15 @@
 use crate::extractor::{AudioMetadata, Extractor, PlaylistItem, shared_http_client};
 use crate::library::{LibraryStore, RepeatMode, TrackRecord};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
 fn shuffled_index(len: usize) -> usize {
+    if len <= 1 {
+        return 0;
+    }
     static SHUFFLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let time_seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -20,20 +23,20 @@ fn shuffled_index(len: usize) -> usize {
     ((value as u128 * len as u128) >> 64) as usize
 }
 
-fn upcoming_cycle_positions(cycle: &[String], upcoming: &[String]) -> Option<Vec<usize>> {
-    let mut used = vec![false; cycle.len()];
-    upcoming
-        .iter()
-        .map(|query| {
-            let index = cycle
-                .iter()
-                .enumerate()
-                .find(|(index, item)| !used[*index] && *item == query)
-                .map(|(index, _)| index)?;
-            used[index] = true;
-            Some(index)
-        })
-        .collect()
+/// Normalize a track query by stripping transient resume parameters (`&t=...`)
+/// while preserving standard YouTube watch URLs or plain test identifiers.
+pub fn canonical_query(query: &str) -> String {
+    if !query.contains("list=")
+        && let Some(vid) = crate::ui_models::requested_video_id(query)
+        && !vid.is_empty()
+    {
+        return format!("https://www.youtube.com/watch?v={}", vid);
+    }
+    query.to_string()
+}
+
+fn same_track(a: &str, b: &str) -> bool {
+    crate::ui_models::query_video_id(a) == crate::ui_models::query_video_id(b)
 }
 
 #[derive(Clone, Debug)]
@@ -53,113 +56,108 @@ pub struct QueueItem {
 }
 
 #[derive(Clone, Default)]
+struct PlaylistState {
+    tracks: Vec<String>,
+    current_index: Option<usize>,
+}
+
+#[derive(Clone, Default)]
 pub struct PlayQueue {
-    inner: Arc<Mutex<VecDeque<String>>>,
-    history: Arc<Mutex<Vec<String>>>,
-    current: Arc<Mutex<Option<String>>>,
+    state: Arc<Mutex<PlaylistState>>,
     preloaded: Arc<Mutex<Option<PreloadedTrack>>>,
     is_preloading: Arc<Mutex<bool>>,
     titles: Arc<Mutex<HashMap<String, QueueItem>>>,
     repeat_mode: Arc<Mutex<RepeatMode>>,
     shuffle_enabled: Arc<Mutex<bool>>,
     autoplay_enabled: Arc<Mutex<bool>>,
-    repeat_cycle: Arc<Mutex<Vec<String>>>,
 }
 
 impl PlayQueue {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(VecDeque::new())),
-            history: Arc::new(Mutex::new(Vec::new())),
-            current: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(PlaylistState::default())),
             preloaded: Arc::new(Mutex::new(None)),
             is_preloading: Arc::new(Mutex::new(false)),
             titles: Arc::new(Mutex::new(HashMap::new())),
             repeat_mode: Arc::new(Mutex::new(RepeatMode::Off)),
             shuffle_enabled: Arc::new(Mutex::new(false)),
             autoplay_enabled: Arc::new(Mutex::new(true)),
-            repeat_cycle: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
+    /// Append a track to the end of the playlist (idempotent: avoids duplicate entries).
     pub fn push_back(&self, item: String) {
-        let current = self.current.lock().unwrap().clone();
-        {
-            let mut cycle = self.repeat_cycle.lock().unwrap();
-            if cycle.is_empty()
-                && let Some(current) = current
-            {
-                cycle.push(current);
-            }
-            cycle.push(item.clone());
+        let item = canonical_query(&item);
+        let mut state = self.state.lock().unwrap();
+        if !state.tracks.iter().any(|q| same_track(q, &item)) {
+            state.tracks.push(item);
         }
-        self.inner.lock().unwrap().push_back(item);
     }
 
-    /// Insert a track at the very front of the upcoming queue ("Play Next").
+    /// Insert a track immediately after the currently playing track ("Play Next").
+    /// If the track already exists in the playlist, moves it to the next position without duplicating.
     pub fn push_front(&self, item: String) {
-        let current = self.current.lock().unwrap().clone();
+        let item = canonical_query(&item);
         {
-            let mut cycle = self.repeat_cycle.lock().unwrap();
-            if cycle.is_empty() {
-                if let Some(current) = current {
-                    cycle.push(current);
+            let mut state = self.state.lock().unwrap();
+            if let Some(existing_idx) = state.tracks.iter().position(|q| same_track(q, &item)) {
+                if state.current_index == Some(existing_idx) {
+                    return;
                 }
-                cycle.push(item.clone());
-            } else {
-                let insert_pos = 1.min(cycle.len());
-                cycle.insert(insert_pos, item.clone());
+                state.tracks.remove(existing_idx);
+                if let Some(curr) = state.current_index
+                    && existing_idx < curr
+                {
+                    state.current_index = Some(curr - 1);
+                }
             }
+            let insert_pos = state
+                .current_index
+                .map(|c| (c + 1).min(state.tracks.len()))
+                .unwrap_or(0);
+            state.tracks.insert(insert_pos, item);
         }
-        self.inner.lock().unwrap().push_front(item);
         if let Ok(mut pre_lock) = self.preloaded.lock() {
             *pre_lock = None;
         }
     }
 
-    /// Start a new repeat-all cycle at a directly selected track, followed by
-    /// the tracks that are still queued.
+    /// Replace the playlist with a single starting track.
     pub fn begin_repeat_cycle(&self, current: String) {
-        let mut cycle = vec![current];
-        cycle.extend(self.inner.lock().unwrap().iter().cloned());
-        *self.repeat_cycle.lock().unwrap() = cycle;
-    }
-
-    #[allow(dead_code)]
-    pub fn pop_front(&self) -> Option<String> {
-        let mut q = self.inner.lock().unwrap();
-        let item = q.pop_front();
-        if let Ok(mut pre_lock) = self.preloaded.lock()
-            && let Some(pre) = pre_lock.as_ref()
-            && item.as_ref() == Some(&pre.query)
-        {
+        let current = canonical_query(&current);
+        let mut state = self.state.lock().unwrap();
+        state.tracks = vec![current];
+        state.current_index = Some(0);
+        if let Ok(mut pre_lock) = self.preloaded.lock() {
             *pre_lock = None;
         }
-        item
     }
 
+    /// Peek the next upcoming track in the playlist for gapless preloading.
     pub fn peek_front(&self) -> Option<String> {
-        self.inner.lock().unwrap().front().cloned()
+        let state = self.state.lock().unwrap();
+        if state.tracks.is_empty() {
+            return None;
+        }
+        match state.current_index {
+            Some(curr) if curr + 1 < state.tracks.len() => Some(state.tracks[curr + 1].clone()),
+            Some(_) if self.repeat_mode() == RepeatMode::All => state.tracks.first().cloned(),
+            None => state.tracks.first().cloned(),
+            _ => None,
+        }
     }
 
-    /// Record currently playing track into history
+    /// Set the active cursor to `query`. If `query` is already in the playlist, moves the
+    /// cursor to its existing index (never duplicates). If not present, appends it and points to it.
     pub fn record_current(&self, query: String) {
-        let mut curr_lock = self.current.lock().unwrap();
-        if let Some(old) = curr_lock.take()
-            && old != query
-        {
-            let mut hist = self.history.lock().unwrap();
-            if hist.last() != Some(&old) {
-                hist.push(old);
-            }
+        let query = canonical_query(&query);
+        let mut state = self.state.lock().unwrap();
+        if let Some(idx) = state.tracks.iter().position(|q| same_track(q, &query)) {
+            state.current_index = Some(idx);
+        } else {
+            state.tracks.push(query);
+            state.current_index = Some(state.tracks.len() - 1);
         }
-        {
-            let mut cycle = self.repeat_cycle.lock().unwrap();
-            if !cycle.contains(&query) {
-                cycle.insert(0, query.clone());
-            }
-        }
-        *curr_lock = Some(query);
     }
 
     pub fn set_track_info(
@@ -170,10 +168,11 @@ impl PlayQueue {
         duration_secs: Option<f64>,
         thumbnail_url: Option<String>,
     ) {
+        let key = canonical_query(query);
         self.titles.lock().unwrap().insert(
-            query.to_string(),
+            key.clone(),
             QueueItem {
-                query: query.to_string(),
+                query: key,
                 title,
                 artist,
                 duration_secs,
@@ -182,23 +181,8 @@ impl PlayQueue {
         );
     }
 
-    pub fn upcoming_items(&self) -> Vec<QueueItem> {
-        let queries: Vec<String> = self.inner.lock().unwrap().iter().cloned().collect();
-        let titles = self.titles.lock().unwrap();
-        queries
-            .into_iter()
-            .map(|query| {
-                titles.get(&query).cloned().unwrap_or_else(|| QueueItem {
-                    title: query.clone(),
-                    query,
-                    ..QueueItem::default()
-                })
-            })
-            .collect()
-    }
-
     pub fn to_track_records(&self) -> Vec<TrackRecord> {
-        self.upcoming_items()
+        self.all_playlist_items()
             .into_iter()
             .map(|item| {
                 let id = crate::ui_models::query_video_id(&item.query);
@@ -214,11 +198,12 @@ impl PlayQueue {
     }
 
     pub fn restore_saved_queue(&self, records: Vec<TrackRecord>) {
+        let mut state = self.state.lock().unwrap();
         let mut titles = self.titles.lock().unwrap();
-        let mut inner = self.inner.lock().unwrap();
-        let mut cycle = self.repeat_cycle.lock().unwrap();
+        state.tracks.clear();
+        state.current_index = None;
         for record in records {
-            let query = record.video_url();
+            let query = canonical_query(&record.video_url());
             titles.insert(
                 query.clone(),
                 QueueItem {
@@ -229,124 +214,190 @@ impl PlayQueue {
                     thumbnail_url: record.thumbnail_url,
                 },
             );
-            inner.push_back(query.clone());
-            cycle.push(query);
+            if !state.tracks.iter().any(|q| same_track(q, &query)) {
+                state.tracks.push(query);
+            }
         }
     }
 
     pub fn current_query(&self) -> Option<String> {
-        self.current.lock().unwrap().clone()
+        let state = self.state.lock().unwrap();
+        state
+            .current_index
+            .and_then(|idx| state.tracks.get(idx).cloned())
     }
 
-    pub fn display_items(&self) -> Vec<String> {
-        let current = self.current.lock().unwrap().clone();
-        let upcoming: Vec<String> = self.inner.lock().unwrap().iter().cloned().collect();
+    pub fn current_index(&self) -> Option<usize> {
+        self.state.lock().unwrap().current_index
+    }
+
+    pub fn history_len(&self) -> usize {
+        self.current_index().unwrap_or(0)
+    }
+
+    pub fn all_playlist_queries(&self) -> Vec<String> {
+        self.state.lock().unwrap().tracks.clone()
+    }
+
+    pub fn all_playlist_items(&self) -> Vec<QueueItem> {
+        let queries = self.all_playlist_queries();
         let titles = self.titles.lock().unwrap();
-        current
+        queries
             .into_iter()
-            .chain(upcoming)
             .map(|query| {
-                titles
-                    .get(&query)
-                    .map(|item| item.title.clone())
-                    .unwrap_or_else(|| query.clone())
+                titles.get(&query).cloned().unwrap_or_else(|| QueueItem {
+                    title: query.clone(),
+                    query,
+                    ..QueueItem::default()
+                })
             })
             .collect()
     }
 
-    /// Pop next item, returning preloaded track assets if ready
-    pub fn pop_next(&self) -> Option<(String, Option<PreloadedTrack>)> {
-        if self.inner.lock().unwrap().is_empty() && self.repeat_mode() == RepeatMode::All {
-            let mut cycle = self.repeat_cycle.lock().unwrap().clone();
-            if cycle.is_empty() {
-                cycle = self.history.lock().unwrap().clone();
-                if let Some(current) = self.current.lock().unwrap().clone()
-                    && cycle.last() != Some(&current)
-                {
-                    cycle.push(current);
-                }
-                *self.repeat_cycle.lock().unwrap() = cycle.clone();
-            }
-            if !cycle.is_empty() {
-                let mut q = self.inner.lock().unwrap();
-                if q.is_empty() {
-                    q.extend(cycle);
-                }
-            }
-        }
-
-        let shuffle = self.shuffle_enabled();
-        let mut q = self.inner.lock().unwrap();
-        let index = if shuffle && q.len() > 1 {
-            shuffled_index(q.len())
+    fn take_preloaded_if_matches(&self, target: &str) -> Option<PreloadedTrack> {
+        let mut pre_lock = self.preloaded.lock().ok()?;
+        let pre = pre_lock.take()?;
+        if same_track(&pre.query, target) {
+            Some(pre)
         } else {
-            0
-        };
-        let query = q.remove(index)?;
-        let mut pre_lock = self.preloaded.lock().unwrap();
-        if let Some(pre) = pre_lock.take()
-            && pre.query == query
-        {
-            return Some((query, Some(pre)));
+            None
         }
-        Some((query, None))
     }
 
-    pub fn pop_at(&self, index: usize) -> Option<(String, Option<PreloadedTrack>)> {
-        let mut q = self.inner.lock().unwrap();
-        let query = q.remove(index)?;
-        let mut pre_lock = self.preloaded.lock().unwrap();
-        if let Some(pre) = pre_lock.take()
-            && pre.query == query
-        {
-            return Some((query, Some(pre)));
-        }
-        Some((query, None))
+    pub fn select_playlist_item(&self, index: usize) -> Option<(String, Option<PreloadedTrack>)> {
+        let target = {
+            let mut state = self.state.lock().unwrap();
+            if index >= state.tracks.len() || state.current_index == Some(index) {
+                return None;
+            }
+            state.current_index = Some(index);
+            state.tracks[index].clone()
+        };
+        let preloaded = self.take_preloaded_if_matches(&target);
+        Some((target, preloaded))
     }
 
-    pub fn remove_at(&self, index: usize) -> Option<String> {
-        let (query, old_upcoming) = {
-            let mut q = self.inner.lock().unwrap();
-            let old_upcoming = q.iter().cloned().collect::<Vec<_>>();
-            (q.remove(index)?, old_upcoming)
+    pub fn remove_playlist_item(&self, index: usize) -> Option<String> {
+        let removed = {
+            let mut state = self.state.lock().unwrap();
+            if index >= state.tracks.len() {
+                return None;
+            }
+            let removed = state.tracks.remove(index);
+            if let Some(curr) = state.current_index {
+                if state.tracks.is_empty() {
+                    state.current_index = None;
+                } else if index < curr {
+                    state.current_index = Some(curr - 1);
+                } else if index == curr && curr >= state.tracks.len() {
+                    state.current_index = Some(state.tracks.len() - 1);
+                }
+            }
+            removed
         };
-        let mut cycle = self.repeat_cycle.lock().unwrap();
-        if let Some(mut positions) = upcoming_cycle_positions(&cycle, &old_upcoming) {
-            cycle.remove(positions.swap_remove(index));
-        }
+
         if let Ok(mut pre_lock) = self.preloaded.lock()
-            && pre_lock.as_ref().is_some_and(|pre| pre.query == query)
+            && pre_lock
+                .as_ref()
+                .is_some_and(|pre| same_track(&pre.query, &removed))
         {
             *pre_lock = None;
         }
-        Some(query)
+        Some(removed)
     }
 
-    pub fn move_item(&self, from: usize, to: usize) -> bool {
-        let (old_upcoming, new_upcoming) = {
-            let mut q = self.inner.lock().unwrap();
-            if from >= q.len() || to >= q.len() || from == to {
+    pub fn move_playlist_item(&self, from: usize, to: usize) -> bool {
+        {
+            let mut state = self.state.lock().unwrap();
+            if from >= state.tracks.len() || to >= state.tracks.len() || from == to {
                 return false;
             }
-            let old_upcoming = q.iter().cloned().collect::<Vec<_>>();
-            let Some(item) = q.remove(from) else {
-                return false;
+            let item = state.tracks.remove(from);
+            state.tracks.insert(to, item);
+
+            state.current_index = match state.current_index {
+                Some(curr) if curr == from => Some(to),
+                Some(curr) if from < curr && to >= curr => Some(curr - 1),
+                Some(curr) if from > curr && to <= curr => Some(curr + 1),
+                other => other,
             };
-            q.insert(to, item);
-            let new_upcoming = q.iter().cloned().collect::<Vec<_>>();
-            (old_upcoming, new_upcoming)
-        };
-        let mut cycle = self.repeat_cycle.lock().unwrap();
-        if let Some(mut positions) = upcoming_cycle_positions(&cycle, &old_upcoming) {
-            positions.sort_unstable();
-            for (position, query) in positions.into_iter().zip(new_upcoming) {
-                cycle[position] = query;
-            }
         }
         if let Ok(mut pre_lock) = self.preloaded.lock() {
             *pre_lock = None;
         }
         true
+    }
+
+    pub fn display_items(&self) -> Vec<String> {
+        let state = self.state.lock().unwrap();
+        let titles = self.titles.lock().unwrap();
+        let curr_idx = state.current_index;
+        state
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(i, query)| {
+                let marker = if Some(i) == curr_idx { "*" } else { "" };
+                let label = titles
+                    .get(query)
+                    .map(|item| item.title.clone())
+                    .unwrap_or_else(|| query.clone());
+                format!("{}{}", marker, label)
+            })
+            .collect()
+    }
+
+    /// Advance cursor to the next track in the playlist without mutating track order or length.
+    pub fn pop_next(&self) -> Option<(String, Option<PreloadedTrack>)> {
+        let target = {
+            let mut state = self.state.lock().unwrap();
+            let len = state.tracks.len();
+            if len == 0 {
+                return None;
+            }
+            let next_idx = match state.current_index {
+                None => 0,
+                Some(curr) => {
+                    if self.shuffle_enabled() && len > 1 {
+                        let offset = 1 + shuffled_index(len - 1);
+                        (curr + offset) % len
+                    } else if curr + 1 < len {
+                        curr + 1
+                    } else if self.repeat_mode() == RepeatMode::All {
+                        0
+                    } else {
+                        return None;
+                    }
+                }
+            };
+            state.current_index = Some(next_idx);
+            state.tracks[next_idx].clone()
+        };
+        let preloaded = self.take_preloaded_if_matches(&target);
+        Some((target, preloaded))
+    }
+
+    /// Move cursor to the previous track in the playlist without mutating track order or length.
+    pub fn pop_previous(&self) -> Option<String> {
+        let mut state = self.state.lock().unwrap();
+        let len = state.tracks.len();
+        if len == 0 {
+            return None;
+        }
+        let prev_idx = match state.current_index {
+            None => 0,
+            Some(curr) => {
+                if curr > 0 {
+                    curr - 1
+                } else if self.repeat_mode() == RepeatMode::All && len > 1 {
+                    len - 1
+                } else {
+                    return None;
+                }
+            }
+        };
+        state.current_index = Some(prev_idx);
+        Some(state.tracks[prev_idx].clone())
     }
 
     pub fn repeat_mode(&self) -> RepeatMode {
@@ -373,85 +424,50 @@ impl PlayQueue {
         *self.autoplay_enabled.lock().unwrap() = enabled;
     }
 
-    /// Pop previous track from history and push current back to upcoming queue
-    pub fn pop_previous(&self) -> Option<String> {
-        let mut curr = self.current.lock().unwrap();
-        let mut hist = self.history.lock().unwrap();
-        let prev = hist.pop()?;
-        if let Some(c) = curr.take() {
-            let mut q = self.inner.lock().unwrap();
-            q.push_front(c);
-        }
-        *curr = Some(prev.clone());
-        Some(prev)
-    }
-
-    #[allow(dead_code)]
     pub fn clear(&self) {
-        self.inner.lock().unwrap().clear();
-        self.history.lock().unwrap().clear();
-        *self.current.lock().unwrap() = None;
-        self.repeat_cycle.lock().unwrap().clear();
+        {
+            let mut state = self.state.lock().unwrap();
+            state.tracks.clear();
+            state.current_index = None;
+        }
         if let Ok(mut pre_lock) = self.preloaded.lock() {
             *pre_lock = None;
         }
         self.titles.lock().unwrap().clear();
     }
 
-    /// Clear upcoming queue items while keeping currently playing track
+    /// Clear playlist items (legacy alias for full playlist reset).
     pub fn clear_upcoming(&self) {
-        self.inner.lock().unwrap().clear();
-        if let Some(current) = self.current.lock().unwrap().clone() {
-            *self.repeat_cycle.lock().unwrap() = vec![current];
-        } else {
-            self.repeat_cycle.lock().unwrap().clear();
-        }
+        let mut state = self.state.lock().unwrap();
+        state.tracks.clear();
+        state.current_index = None;
         if let Ok(mut pre_lock) = self.preloaded.lock() {
             *pre_lock = None;
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().unwrap().is_empty()
+        self.state.lock().unwrap().tracks.is_empty()
     }
 
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().len()
+        self.state.lock().unwrap().tracks.len()
     }
 
-    /// Load a list of playlist items: returns the first item to play immediately,
-    /// and enqueues the remaining items.
+    /// Load a list of extracted YouTube playlist items, selecting the first track.
     pub fn load_playlist(&self, items: Vec<PlaylistItem>) -> Option<String> {
-        self.inner.lock().unwrap().clear();
-        self.history.lock().unwrap().clear();
-        *self.current.lock().unwrap() = None;
-        self.repeat_cycle.lock().unwrap().clear();
+        let mut state = self.state.lock().unwrap();
+        let mut titles = self.titles.lock().unwrap();
+        state.tracks.clear();
+        state.current_index = None;
         if let Ok(mut pre_lock) = self.preloaded.lock() {
             *pre_lock = None;
         }
-        let mut titles = self.titles.lock().unwrap();
-        let mut iter = items.into_iter();
-        let first_item = iter.next();
-        let mut repeat_cycle = Vec::new();
-        if let Some(item) = &first_item {
+
+        for item in items {
             let query = format!("https://www.youtube.com/watch?v={}", item.id);
-            repeat_cycle.push(query.clone());
-            titles.insert(
-                query.clone(),
-                QueueItem {
-                    query,
-                    title: item.title.clone(),
-                    artist: item.uploader.clone().unwrap_or_default(),
-                    duration_secs: item.duration,
-                    thumbnail_url: item.thumbnail.clone(),
-                },
-            );
-        }
-        let mut upcoming = Vec::new();
-        for item in iter {
-            let query = format!("https://www.youtube.com/watch?v={}", item.id);
-            repeat_cycle.push(query.clone());
             titles.insert(
                 query.clone(),
                 QueueItem {
@@ -462,12 +478,16 @@ impl PlayQueue {
                     thumbnail_url: item.thumbnail,
                 },
             );
-            upcoming.push(query);
+            if !state.tracks.iter().any(|q| same_track(q, &query)) {
+                state.tracks.push(query);
+            }
         }
-        drop(titles);
-        self.inner.lock().unwrap().extend(upcoming);
-        *self.repeat_cycle.lock().unwrap() = repeat_cycle;
-        first_item.map(|item| format!("https://www.youtube.com/watch?v={}", item.id))
+        if !state.tracks.is_empty() {
+            state.current_index = Some(0);
+            Some(state.tracks[0].clone())
+        } else {
+            None
+        }
     }
 
     /// Preload the next track's metadata and thumbnail before current song ends
@@ -484,7 +504,7 @@ impl PlayQueue {
             }
             if let Ok(pre_lock) = self.preloaded.lock()
                 && let Some(pre) = pre_lock.as_ref()
-                && pre.query == next_query
+                && same_track(&pre.query, &next_query)
             {
                 return; // Already preloaded
             }
@@ -517,7 +537,10 @@ impl PlayQueue {
                     cover_path = Some(saved_path);
                 }
 
-                if queue_clone.peek_front().as_ref() == Some(&next_query) {
+                if queue_clone
+                    .peek_front()
+                    .is_some_and(|front| same_track(&front, &next_query))
+                {
                     info!(
                         "Gapless preloader: Next track preloaded successfully: {}",
                         meta.title
@@ -532,63 +555,6 @@ impl PlayQueue {
             *queue_clone.is_preloading.lock().unwrap() = false;
         });
     }
-
-    /// Prefetch related recommendations with full metadata & covers when the queue is empty
-    pub fn prefetch_autoplay(
-        &self,
-        extractor: Arc<Extractor>,
-        library: LibraryStore,
-        current_id: String,
-    ) {
-        if !self.autoplay_enabled() || self.repeat_mode() != RepeatMode::Off {
-            return;
-        }
-        let queue_clone = self.clone();
-        tokio::spawn(async move {
-            if !queue_clone.is_empty() {
-                return;
-            }
-            if let Ok(related_items) = extractor.extract_autoplay_next(&current_id).await
-                && queue_clone.is_empty()
-                && queue_clone.autoplay_enabled()
-                && queue_clone.repeat_mode() == RepeatMode::Off
-            {
-                let count = related_items.len();
-                let mut records_for_cover = Vec::new();
-                for item in related_items {
-                    let url = format!("https://www.youtube.com/watch?v={}", item.id);
-                    let artist = item
-                        .uploader
-                        .clone()
-                        .unwrap_or_else(|| "YouTube Mix".into());
-                    queue_clone.set_track_info(
-                        &url,
-                        item.title.clone(),
-                        artist.clone(),
-                        item.duration,
-                        item.thumbnail.clone(),
-                    );
-                    queue_clone.push_back(url);
-                    records_for_cover.push(TrackRecord {
-                        id: item.id,
-                        title: item.title,
-                        artist,
-                        duration_secs: item.duration,
-                        thumbnail_url: item.thumbnail,
-                    });
-                }
-                info!(
-                    "Prefetched {} autoplay recommendations with full metadata into queue",
-                    count
-                );
-                let client = shared_http_client().clone();
-                for track in records_for_cover {
-                    crate::ui_models::cache_track_cover(client.clone(), library.clone(), track)
-                        .await;
-                }
-            }
-        });
-    }
 }
 
 #[cfg(test)]
@@ -600,8 +566,8 @@ mod tests {
     fn repeat_all_reuses_a_fixed_cycle() {
         let queue = PlayQueue::new();
         queue.set_repeat_mode(RepeatMode::All);
-        queue.push_back("B".into());
         queue.record_current("A".into());
+        queue.push_back("B".into());
 
         for expected in ["B", "A", "B", "A"] {
             let (query, _) = queue.pop_next().expect("repeat-all should provide a track");
@@ -609,33 +575,44 @@ mod tests {
             queue.record_current(query);
         }
 
-        assert_eq!(*queue.repeat_cycle.lock().unwrap(), ["A", "B"]);
+        assert_eq!(queue.all_playlist_queries(), vec!["A", "B"]);
     }
 
     #[test]
-    fn queue_edits_are_reflected_in_the_repeat_cycle() {
+    fn playlist_moves_and_removals_preserve_cursor_and_order() {
         let queue = PlayQueue::new();
         queue.record_current("A".into());
         queue.push_back("B".into());
         queue.push_back("C".into());
         queue.push_back("D".into());
 
-        assert!(queue.move_item(0, 2));
-        assert_eq!(*queue.repeat_cycle.lock().unwrap(), ["A", "C", "D", "B"]);
-        assert_eq!(queue.remove_at(1).as_deref(), Some("D"));
-        assert_eq!(*queue.repeat_cycle.lock().unwrap(), ["A", "C", "B"]);
+        assert!(queue.move_playlist_item(1, 3));
+        assert_eq!(queue.all_playlist_queries(), vec!["A", "C", "D", "B"]);
+        assert_eq!(queue.remove_playlist_item(2).as_deref(), Some("D"));
+        assert_eq!(queue.all_playlist_queries(), vec!["A", "C", "B"]);
     }
 
     #[test]
-    fn directly_selected_track_starts_a_fresh_repeat_cycle() {
+    fn rapid_next_prev_never_duplicates_tracks() {
         let queue = PlayQueue::new();
-        queue.push_back("old queued track".into());
-        queue.record_current("old current track".into());
-        queue.begin_repeat_cycle("new current track".into());
+        queue.set_repeat_mode(RepeatMode::All);
+        queue.push_back("https://www.youtube.com/watch?v=LifeGoesOn".into());
+        queue.push_back("https://www.youtube.com/watch?v=NORMAL".into());
+        queue.record_current("https://www.youtube.com/watch?v=LifeGoesOn&t=58s".into());
+
+        for _ in 0..20 {
+            let (next_q, _) = queue.pop_next().unwrap();
+            queue.record_current(next_q);
+            let prev_q = queue.pop_previous().unwrap();
+            queue.record_current(prev_q);
+        }
 
         assert_eq!(
-            *queue.repeat_cycle.lock().unwrap(),
-            ["new current track", "old queued track"]
+            queue.all_playlist_queries(),
+            vec![
+                "https://www.youtube.com/watch?v=LifeGoesOn",
+                "https://www.youtube.com/watch?v=NORMAL"
+            ]
         );
     }
 
@@ -646,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn pop_previous_restores_history_and_prepends_current() {
+    fn pop_previous_moves_cursor_back_and_forward() {
         let queue = PlayQueue::new();
         queue.record_current("Song 1".into());
         queue.record_current("Song 2".into());
@@ -655,13 +632,14 @@ mod tests {
         assert_eq!(queue.pop_previous().as_deref(), Some("Song 2"));
         assert_eq!(queue.current_query().as_deref(), Some("Song 2"));
 
-        // The track that was current ("Song 3") should now be at the front of upcoming queue
-        let (next_song, _) = queue.pop_next().expect("upcoming queue should contain previous current");
+        let (next_song, _) = queue
+            .pop_next()
+            .expect("playlist should advance back to Song 3");
         assert_eq!(next_song, "Song 3");
     }
 
     #[test]
-    fn pop_previous_when_history_empty_returns_none() {
+    fn pop_previous_when_at_first_track_without_repeat_returns_none() {
         let queue = PlayQueue::new();
         assert_eq!(queue.pop_previous(), None);
 
@@ -678,5 +656,51 @@ mod tests {
         assert!(!queue.autoplay_enabled());
         queue.set_autoplay_enabled(true);
         assert!(queue.autoplay_enabled());
+    }
+
+    #[test]
+    fn select_playlist_item_preserves_absolute_playlist_order() {
+        let queue = PlayQueue::new();
+        queue.push_back("Track 1".into());
+        queue.push_back("Track 2".into());
+        queue.push_back("Track 3".into());
+        queue.push_back("Track 4".into());
+        queue.push_back("Track 5".into());
+
+        assert_eq!(
+            queue.all_playlist_queries(),
+            vec!["Track 1", "Track 2", "Track 3", "Track 4", "Track 5"]
+        );
+
+        let selected = queue.select_playlist_item(2);
+        assert_eq!(selected.map(|(q, _)| q), Some("Track 3".to_string()));
+        assert_eq!(queue.current_query().as_deref(), Some("Track 3"));
+
+        assert_eq!(
+            queue.all_playlist_queries(),
+            vec!["Track 1", "Track 2", "Track 3", "Track 4", "Track 5"]
+        );
+
+        let (next_q, _) = queue.pop_next().expect("Track 4 should be next");
+        assert_eq!(next_q, "Track 4");
+        queue.record_current(next_q);
+        assert_eq!(
+            queue.all_playlist_queries(),
+            vec!["Track 1", "Track 2", "Track 3", "Track 4", "Track 5"]
+        );
+
+        let prev_q = queue.pop_previous().expect("Track 3 should be previous");
+        assert_eq!(prev_q, "Track 3");
+        assert_eq!(
+            queue.all_playlist_queries(),
+            vec!["Track 1", "Track 2", "Track 3", "Track 4", "Track 5"]
+        );
+
+        let selected_1 = queue.select_playlist_item(0);
+        assert_eq!(selected_1.map(|(q, _)| q), Some("Track 1".to_string()));
+        assert_eq!(
+            queue.all_playlist_queries(),
+            vec!["Track 1", "Track 2", "Track 3", "Track 4", "Track 5"]
+        );
     }
 }

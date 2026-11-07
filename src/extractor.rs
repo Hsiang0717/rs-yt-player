@@ -449,6 +449,7 @@ impl Extractor {
 
     /// Extract next related tracks with FULL metadata (title, artist, duration, thumbnail)
     /// for continuous autoplay (YouTube Radio Mix)
+    #[allow(dead_code)]
     pub async fn extract_autoplay_next(&self, current_video_id: &str) -> Result<Vec<PlaylistItem>> {
         let mix_url = format!(
             "https://www.youtube.com/watch?v={}&list=RD{}",

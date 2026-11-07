@@ -26,56 +26,36 @@ pub fn bind_library_controls(
 ) {
     let ctx_for_play_fav = ctx.clone();
     app.on_play_favorite(move |key| {
-        ctx_for_play_fav.start_track(key.to_string(), false);
-    });
-
-    // Batch Play All: replaces upcoming queue with all items in current tab and plays the first
-    let ctx_for_play_all = ctx.clone();
-    let search_for_play_all = Arc::clone(&search_records);
-    app.on_play_all(move |tab| {
-        let records = resolve_tab_records(tab.as_str(), &search_for_play_all, &ctx_for_play_all.library);
-        let mut iter = records.into_iter();
-        let Some(first) = iter.next() else {
-            return;
-        };
-        let first_url = first.video_url();
-        ctx_for_play_all.queue.clear_upcoming();
-        ctx_for_play_all.queue.set_track_info(
-            &first_url,
-            first.title,
-            first.artist,
-            first.duration_secs,
-            first.thumbnail_url,
-        );
-        ctx_for_play_all.queue.begin_repeat_cycle(first_url.clone());
-
-        let mut count = 1usize;
-        for record in iter {
-            let url = record.video_url();
-            ctx_for_play_all.queue.set_track_info(
-                &url,
-                record.title,
-                record.artist,
-                record.duration_secs,
-                record.thumbnail_url,
-            );
-            ctx_for_play_all.queue.push_back(url);
-            count += 1;
-        }
-        ctx_for_play_all
+        let key_str = key.to_string();
+        let target_id = query_video_id(&key_str);
+        if let Some(track) = ctx_for_play_fav
             .library
-            .save_queue(ctx_for_play_all.queue.to_track_records());
-        if let Some(ui) = ctx_for_play_all.ui_weak.upgrade() {
-            ui.set_queue_items(queue_items_model(
-                &ctx_for_play_all.queue,
-                &ctx_for_play_all.library,
-            ));
-            ui.set_panel_message(slint::SharedString::from(format!(
-                "Playing all ({} tracks)",
-                count
-            )));
+            .favorites()
+            .into_iter()
+            .find(|r| r.id == target_id)
+        {
+            let url = track.video_url();
+            ctx_for_play_fav.queue.set_track_info(
+                &url,
+                track.title,
+                track.artist,
+                track.duration_secs,
+                track.thumbnail_url,
+            );
+            ctx_for_play_fav.queue.record_current(url.clone());
+            ctx_for_play_fav
+                .library
+                .save_queue(ctx_for_play_fav.queue.to_track_records());
+            if let Some(ui) = ctx_for_play_fav.ui_weak.upgrade() {
+                ui.set_queue_items(queue_items_model(
+                    &ctx_for_play_fav.queue,
+                    &ctx_for_play_fav.library,
+                ));
+            }
+            ctx_for_play_fav.start_track(url, false);
+        } else {
+            ctx_for_play_fav.start_track(key_str, false);
         }
-        ctx_for_play_all.start_track(first_url, false);
     });
 
     // Batch Enqueue All: appends all items in current tab to upcoming queue
@@ -111,13 +91,14 @@ pub fn bind_library_controls(
                 &ctx_for_enqueue_all.library,
             ));
             ui.set_panel_message(slint::SharedString::from(format!(
-                "Added {} tracks to queue",
+                "Added {} tracks to playlist",
                 count
             )));
         }
     });
 
     let library_for_remove = ctx.library.clone();
+    let queue_for_remove = ctx.queue.clone();
     let search_records_for_remove = Arc::clone(&search_records);
     let ui_weak_remove = ctx.ui_weak.clone();
     app.on_remove_favorite(move |key| {
@@ -141,50 +122,16 @@ pub fn bind_library_controls(
                     &library_for_remove,
                     Some(&curr_key),
                 ));
-                ui.set_history_items(records_model(
-                    library_for_remove.recent(),
-                    &library_for_remove,
-                    Some(&curr_key),
-                ));
+                ui.set_queue_items(queue_items_model(&queue_for_remove, &library_for_remove));
                 ui.set_current_is_favorite(library_for_remove.is_favorite(&id));
                 ui.set_panel_message(slint::SharedString::from("Removed from favorites"));
             }
         }
     });
 
-    let ctx_for_play_history = ctx.clone();
-    app.on_play_history(move |key| {
-        ctx_for_play_history.start_track(key.to_string(), false);
-    });
-
-    let library_for_hist_fav = ctx.library.clone();
-    let ui_weak_hist_fav = ctx.ui_weak.clone();
-    app.on_favorite_history(move |key| {
-        let id = query_video_id(key.as_str());
-        if let Some(track) = library_for_hist_fav
-            .recent()
-            .into_iter()
-            .find(|track| track.id == id)
-        {
-            library_for_hist_fav.toggle_favorite(track);
-            if let Some(ui) = ui_weak_hist_fav.upgrade() {
-                let curr_key = ui.get_current_track_key();
-                ui.set_history_items(records_model(
-                    library_for_hist_fav.recent(),
-                    &library_for_hist_fav,
-                    Some(&curr_key),
-                ));
-                ui.set_favorite_items(records_model(
-                    library_for_hist_fav.favorites(),
-                    &library_for_hist_fav,
-                    Some(&curr_key),
-                ));
-                ui.set_current_is_favorite(library_for_hist_fav.is_favorite(&id));
-            }
-        }
-    });
-
     let library_for_curr_fav = ctx.library;
+    let queue_for_curr_fav = ctx.queue;
+    let search_records_for_curr_fav = search_records;
     let ui_weak_curr_fav = ctx.ui_weak;
     app.on_toggle_current_favorite(move || {
         let Some(ui) = ui_weak_curr_fav.upgrade() else {
@@ -195,7 +142,29 @@ pub fn bind_library_controls(
             return;
         }
         let id = query_video_id(&key);
-        let record = library_for_curr_fav.find_track(&id);
+        let record = library_for_curr_fav
+            .find_track(&id)
+            .or_else(|| {
+                search_records_for_curr_fav
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r.id == id)
+                    .cloned()
+            })
+            .or_else(|| {
+                queue_for_curr_fav
+                    .all_playlist_items()
+                    .into_iter()
+                    .find(|item| query_video_id(&item.query) == id)
+                    .map(|item| TrackRecord {
+                        id: id.clone(),
+                        title: item.title,
+                        artist: item.artist,
+                        duration_secs: item.duration_secs,
+                        thumbnail_url: item.thumbnail_url,
+                    })
+            });
         if let Some(record) = record {
             let is_favorite = library_for_curr_fav.toggle_favorite(record);
             ui.set_current_is_favorite(is_favorite);
@@ -205,11 +174,21 @@ pub fn bind_library_controls(
                 &library_for_curr_fav,
                 Some(&curr_key),
             ));
-            ui.set_history_items(records_model(
-                library_for_curr_fav.recent(),
+            ui.set_queue_items(queue_items_model(
+                &queue_for_curr_fav,
+                &library_for_curr_fav,
+            ));
+            let results = search_records_for_curr_fav.lock().unwrap().clone();
+            ui.set_search_results(records_model(
+                results,
                 &library_for_curr_fav,
                 Some(&curr_key),
             ));
+            ui.set_panel_message(slint::SharedString::from(if is_favorite {
+                "Added to favorites"
+            } else {
+                "Removed from favorites"
+            }));
         }
     });
 }

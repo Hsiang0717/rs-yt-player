@@ -138,10 +138,12 @@ pub fn records_model(
 
 pub fn queue_items_model(queue: &PlayQueue, library: &LibraryStore) -> slint::ModelRc<TrackRow> {
     let current_key = queue.current_query();
+    let history_len = queue.history_len();
     let rows = queue
-        .upcoming_items()
+        .all_playlist_items()
         .into_iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(index, item)| {
             let track = TrackRecord {
                 id: query_video_id(&item.query),
                 title: item.title,
@@ -149,10 +151,21 @@ pub fn queue_items_model(queue: &PlayQueue, library: &LibraryStore) -> slint::Mo
                 duration_secs: item.duration_secs,
                 thumbnail_url: item.thumbnail_url,
             };
-            (track, item.query)
+            let cover = load_cached_cover_image(library, &track.id).unwrap_or_default();
+            let duration = track.duration_label();
+            let is_current = current_key.is_some() && index == history_len;
+            TrackRow {
+                key: slint::SharedString::from(item.query),
+                title: slint::SharedString::from(track.title),
+                artist: slint::SharedString::from(track.artist),
+                duration: slint::SharedString::from(duration),
+                cover,
+                is_current,
+                is_favorite: library.is_favorite(&track.id),
+            }
         })
-        .collect();
-    track_row_model(rows, library, current_key.as_deref())
+        .collect::<Vec<_>>();
+    slint::ModelRc::new(slint::VecModel::from(rows))
 }
 
 pub fn apply_queue_expanded(ui: &AppWindow, expanded: bool) {
@@ -166,21 +179,6 @@ pub fn apply_queue_expanded(ui: &AppWindow, expanded: bool) {
     ui.window()
         .set_size(slint::LogicalSize::new(logical_w, target_h));
     ui.set_queue_expanded(expanded);
-}
-
-#[allow(dead_code)]
-pub fn update_queue_ui(
-    ui_weak: slint::Weak<AppWindow>,
-    queue: PlayQueue,
-    library: LibraryStore,
-    expanded: Option<bool>,
-) {
-    let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-        ui.set_queue_items(queue_items_model(&queue, &library));
-        if let Some(expanded) = expanded {
-            apply_queue_expanded(&ui, expanded);
-        }
-    });
 }
 
 pub async fn cache_track_cover(

@@ -10,8 +10,8 @@ use crate::player::AudioPlayer;
 use crate::queue::PlayQueue;
 use crate::smtc::SmtcManager;
 use crate::ui_models::{
-    apply_queue_expanded, load_cached_cover_image, query_video_id, queue_items_model,
-    record_from_audio, records_model, requested_video_id,
+    apply_queue_expanded, load_cached_cover_image, queue_items_model, record_from_audio,
+    records_model, requested_video_id,
 };
 
 pub mod transport;
@@ -30,7 +30,7 @@ pub async fn play_with_metadata(
     query_str: String,
     meta: AudioMetadata,
     cover_path: Option<std::path::PathBuf>,
-    extractor: Arc<Extractor>,
+    _extractor: Arc<Extractor>,
     player: Arc<AudioPlayer>,
     smtc: SmtcHandle,
     ui_weak: slint::Weak<AppWindow>,
@@ -63,7 +63,6 @@ pub async fn play_with_metadata(
         .audio_codec
         .unwrap_or_else(|| "AAC".to_string())
         .to_uppercase();
-    let current_id = meta.id.clone();
     let request_headers = meta.http_headers.clone();
     let loudness_db = meta.loudness_db;
 
@@ -128,7 +127,8 @@ pub async fn play_with_metadata(
                 ui.set_track_status(slint::SharedString::from("PLAYING"));
                 ui.set_can_retry(false);
                 ui.set_has_active_track(true);
-                ui.set_current_track_key(slint::SharedString::from(query_str.clone()));
+                let canon_key = crate::queue::canonical_query(&query_str);
+                ui.set_current_track_key(slint::SharedString::from(canon_key.clone()));
                 ui.set_current_is_favorite(library_for_ui.is_favorite(&record.id));
                 ui.set_progress_ratio(if duration_secs > 0.0 {
                     start_offset_secs / duration_secs
@@ -155,12 +155,7 @@ pub async fn play_with_metadata(
                 ui.set_favorite_items(records_model(
                     library_for_ui.favorites(),
                     &library_for_ui,
-                    Some(&query_str),
-                ));
-                ui.set_history_items(records_model(
-                    library_for_ui.recent(),
-                    &library_for_ui,
-                    Some(&query_str),
+                    Some(&canon_key),
                 ));
                 ui.set_queue_items(queue_items_model(&queue_for_ui, &library_for_ui));
                 ui.set_panel_message(slint::SharedString::default());
@@ -187,7 +182,6 @@ pub async fn play_with_metadata(
     });
 
     if playback_succeeded {
-        queue.prefetch_autoplay(Arc::clone(&extractor), library, current_id);
         crate::win32_window::trim_process_working_set();
     }
 }
@@ -207,19 +201,10 @@ pub async fn play_track(
 
     loop {
         *last_query.lock().unwrap() = Some(active_query.clone());
-        let query_vid = query_video_id(&active_query);
-        let library_for_load = library.clone();
-        let vid_for_load = query_vid.clone();
         let _ = ui_weak.upgrade_in_event_loop(move |ui| {
             ui.set_is_loading(true);
             ui.set_can_retry(false);
             ui.set_track_status(slint::SharedString::from("LOADING..."));
-            if let Some(img) = load_cached_cover_image(&library_for_load, &vid_for_load) {
-                ui.set_cover_image(img);
-                ui.set_has_cover(true);
-            } else {
-                ui.set_has_cover(false);
-            }
         });
 
         let is_playlist_url = active_query.contains("list=");
