@@ -1,6 +1,7 @@
 /target
 /target-codex
 /dist
+/.archify
 bin/*.exe
 *.png
 *.log
