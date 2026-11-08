@@ -144,7 +144,7 @@ pub async fn play_with_metadata(
                 } else {
                     0.0
                 });
-                ui.set_buffer_ratio(0.0);
+                ui.set_buffer_ratio(if is_local_file { 1.0 } else { 0.0 });
                 let pos_str = format_duration_secs(start_offset_secs as f64);
                 ui.set_time_current(slint::SharedString::from(pos_str.clone()));
                 ui.set_time_total(slint::SharedString::from(duration_str.clone()));

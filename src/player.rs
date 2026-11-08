@@ -645,8 +645,20 @@ impl AudioPlayer {
         }
     }
 
+    pub fn is_local_file(&self) -> bool {
+        self.current_stream_url
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(|url| std::path::Path::new(url).is_file())
+            .unwrap_or(false)
+    }
+
     /// Calculate the current buffered position in seconds.
     pub fn buffered_position(&self) -> f32 {
+        if self.is_local_file() {
+            return self.total_duration();
+        }
         let current = self.current_position();
         let timing = self.timing.lock().unwrap();
         let range_stats = self.range_buffer_stats.lock().unwrap();
@@ -673,6 +685,9 @@ impl AudioPlayer {
     }
 
     pub fn buffer_ratio(&self) -> f32 {
+        if self.is_local_file() {
+            return 1.0;
+        }
         let dur = self.total_duration();
         if dur > 0.0 {
             (self.buffered_position() / dur).clamp(0.0, 1.0)
