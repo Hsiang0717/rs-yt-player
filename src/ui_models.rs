@@ -112,6 +112,7 @@ pub fn track_row_model(
                 cover,
                 is_current,
                 is_favorite: library.is_favorite(&track.id),
+                is_cached: library.is_audio_cached(&track.id),
             }
         })
         .collect::<Vec<_>>();
@@ -162,6 +163,7 @@ pub fn queue_items_model(queue: &PlayQueue, library: &LibraryStore) -> slint::Mo
                 cover,
                 is_current,
                 is_favorite: library.is_favorite(&track.id),
+                is_cached: library.is_audio_cached(&track.id),
             }
         })
         .collect::<Vec<_>>();

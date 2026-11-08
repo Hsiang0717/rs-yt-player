@@ -274,6 +274,7 @@ pub fn bind_search_controls(
     });
 
     // on_toggle_search_favorite
+    let extractor_for_toggle = Arc::clone(&ctx.extractor);
     let library_for_toggle = ctx.library.clone();
     let queue_for_toggle = ctx.queue.clone();
     let search_records_for_fav = Arc::clone(&search_records);
@@ -283,7 +284,24 @@ pub fn bind_search_controls(
         if let Some(record) =
             find_track_record(&key, &search_records_for_fav, &library_for_toggle, &queue_for_toggle)
         {
-            let is_fav = library_for_toggle.toggle_favorite(record);
+            let is_fav = library_for_toggle.toggle_favorite(record.clone());
+            if is_fav && library_for_toggle.find_cached_audio(&record.id).is_none() {
+                let extractor_bg = Arc::clone(&extractor_for_toggle);
+                let cache_dir = library_for_toggle.audio_cache_dir();
+                let track_id = record.id.clone();
+                let ui_weak_refresh = ui_weak_fav.clone();
+                let queue_refresh = queue_for_toggle.clone();
+                let library_refresh = library_for_toggle.clone();
+                tokio::spawn(async move {
+                    if let Ok(_) =
+                        extractor_bg.download_audio_track(&track_id, &cache_dir).await
+                    {
+                        let _ = ui_weak_refresh.upgrade_in_event_loop(move |ui| {
+                            sync_queue_to_ui(&ui, &queue_refresh, &library_refresh);
+                        });
+                    }
+                });
+            }
             if let Some(ui) = ui_weak_fav.upgrade() {
                 let results = search_records_for_fav.lock().unwrap().clone();
                 let curr_key = ui.get_current_track_key();

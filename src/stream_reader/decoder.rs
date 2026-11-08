@@ -100,6 +100,37 @@ impl<R: Read + Send> MediaSource for NonSeekableSource<R> {
     }
 }
 
+pub struct SeekableFileSource(std::fs::File);
+
+impl SeekableFileSource {
+    pub fn open(path: &std::path::Path) -> std::io::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        Ok(Self(file))
+    }
+}
+
+impl Read for SeekableFileSource {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buffer)
+    }
+}
+
+impl Seek for SeekableFileSource {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(position)
+    }
+}
+
+impl MediaSource for SeekableFileSource {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.0.metadata().ok().map(|m| m.len())
+    }
+}
+
 impl DecodedAudioSource {
     pub fn new<R: Read + Send + 'static>(reader: R, start_offset_secs: f32) -> Result<Self> {
         let source = NonSeekableSource(Mutex::new(reader));
@@ -108,6 +139,16 @@ impl DecodedAudioSource {
 
     pub fn new_seekable(source: AsyncRangeMediaSource, start_offset_secs: f32) -> Result<Self> {
         Self::from_media_source(Box::new(source), start_offset_secs, true)
+    }
+
+    pub fn new_from_file(path: &std::path::Path, start_offset_secs: f32) -> Result<Self> {
+        let source = SeekableFileSource::open(path)
+            .with_context(|| format!("Failed to open local audio file at {:?}", path))?;
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("m4a");
+        Self::from_media_source_with_hint(Box::new(source), start_offset_secs, true, ext)
     }
 
     pub fn with_loudness_gain(mut self, gain: f32) -> Self {
@@ -128,6 +169,15 @@ impl DecodedAudioSource {
         start_offset_secs: f32,
         seekable: bool,
     ) -> Result<Self> {
+        Self::from_media_source_with_hint(source, start_offset_secs, seekable, "m4a")
+    }
+
+    fn from_media_source_with_hint(
+        source: Box<dyn MediaSource>,
+        start_offset_secs: f32,
+        seekable: bool,
+        extension: &str,
+    ) -> Result<Self> {
         let allow_seek = Arc::new(AtomicBool::new(false));
         let gate_source = ProbeGateSource {
             inner: source,
@@ -137,7 +187,7 @@ impl DecodedAudioSource {
         let stream =
             MediaSourceStream::new(Box::new(gate_source), MediaSourceStreamOptions::default());
         let mut hint = Hint::new();
-        hint.with_extension("m4a");
+        hint.with_extension(extension);
 
         let probed = symphonia::default::get_probe()
             .format(

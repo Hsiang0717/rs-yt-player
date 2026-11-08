@@ -250,6 +250,68 @@ impl Extractor {
         parse_search_results(&output.stdout)
     }
 
+    /// Background non-blocking download of track audio directly into local cache.
+    pub async fn download_audio_track(
+        &self,
+        id: &str,
+        cache_dir: &std::path::Path,
+    ) -> Result<PathBuf> {
+        let safe_id: String = id
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+            .collect();
+        if safe_id.is_empty() {
+            return Err(anyhow!("Invalid track id for download"));
+        }
+
+        tokio::fs::create_dir_all(cache_dir)
+            .await
+            .with_context(|| format!("Failed to create audio cache directory at {:?}", cache_dir))?;
+
+        let url = format!("https://www.youtube.com/watch?v={}", safe_id);
+        let out_template = format!("{}/%(id)s.%(ext)s", cache_dir.display());
+
+        info!(
+            "Starting background audio caching for {} to {}",
+            safe_id, out_template
+        );
+
+        let status = async_silent_command(&self.yt_dlp_path)
+            .args([
+                "--no-warnings",
+                "--no-playlist",
+                "-f",
+                AUDIO_FORMAT_SELECTOR,
+                "-o",
+                &out_template,
+                &url,
+            ])
+            .status()
+            .await
+            .context("Failed to spawn yt-dlp to download audio")?;
+
+        if !status.success() {
+            return Err(anyhow!("yt-dlp download failed with status: {}", status));
+        }
+
+        // Verify resulting file
+        for ext in &["m4a", "webm", "opus", "mp3"] {
+            let candidate = cache_dir.join(format!("{}.{}", safe_id, ext));
+            if candidate.is_file()
+                && let Ok(meta) = tokio::fs::metadata(&candidate).await
+                && meta.len() > 1024
+            {
+                info!("Successfully cached track audio at {:?}", candidate);
+                return Ok(candidate);
+            }
+        }
+
+        Err(anyhow!(
+            "Downloaded audio file not found or empty for {}",
+            safe_id
+        ))
+    }
+
     pub fn start_offset_secs(query: &str) -> Option<f32> {
         let query = query.split_once('?')?.1.split('#').next()?;
         query.split('&').find_map(|part| {

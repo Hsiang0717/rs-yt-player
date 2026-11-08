@@ -59,10 +59,14 @@ pub async fn play_with_metadata(
         meta.start_offset_secs
     };
     let duration_str = format_duration_secs(duration_secs as f64);
-    let badge = meta
-        .audio_codec
-        .unwrap_or_else(|| "AAC".to_string())
-        .to_uppercase();
+    let is_local_file = std::path::Path::new(&meta.stream_url).is_file();
+    let badge = if is_local_file {
+        "CACHED".to_string()
+    } else {
+        meta.audio_codec
+            .unwrap_or_else(|| "AAC".to_string())
+            .to_uppercase()
+    };
     let request_headers = meta.http_headers.clone();
     let loudness_db = meta.loudness_db;
 
@@ -71,12 +75,17 @@ pub async fn play_with_metadata(
     let play_res = tokio::task::spawn_blocking(move || {
         player.set_current_query(Some(query_for_player));
         player.set_loudness_db(loudness_db);
-        player.play_stream_from_with_headers(
-            &stream_url,
-            request_headers,
-            start_offset_secs,
-            duration_secs,
-        )
+        let path = std::path::Path::new(&stream_url);
+        if path.is_file() {
+            player.play_file_from(path, start_offset_secs, duration_secs)
+        } else {
+            player.play_stream_from_with_headers(
+                &stream_url,
+                request_headers,
+                start_offset_secs,
+                duration_secs,
+            )
+        }
     })
     .await;
 
@@ -261,11 +270,102 @@ pub async fn play_track(
             }
         });
 
+        // Fast-path: Check if the track audio is already cached locally to skip yt-dlp lookup
+        let resolved_vid = if let Some(vid) = requested_video_id(&target_query) {
+            Some(vid.to_string())
+        } else if let Some(rest) = target_query
+            .strip_prefix("https://youtu.be/")
+            .or_else(|| target_query.strip_prefix("http://youtu.be/"))
+        {
+            Some(
+                rest.split(['?', '&', '#'])
+                    .next()
+                    .unwrap_or(rest)
+                    .to_string(),
+            )
+        } else {
+            let trimmed = target_query.trim();
+            if trimmed.len() == 11
+                && trimmed
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                Some(trimmed.to_string())
+            } else {
+                None
+            }
+        };
+
+        if let Some(vid) = &resolved_vid
+            && let Some(cached_file) = library.find_cached_audio(vid)
+            && let Some(record) = library.find_track(vid)
+        {
+            info!(
+                "Fast-path: playing cached audio {:?} without yt-dlp lookup",
+                cached_file
+            );
+            let meta = AudioMetadata {
+                id: record.id.clone(),
+                title: record.title.clone(),
+                uploader: Some(record.artist.clone()),
+                duration: record.duration_secs,
+                thumbnail: record.thumbnail_url.clone(),
+                stream_url: cached_file.to_string_lossy().to_string(),
+                audio_codec: Some("CACHED".to_string()),
+                start_offset_secs: requested_offset_secs,
+                http_headers: None,
+                loudness_db: None,
+            };
+            let mut cover_path = None;
+            let local_cache = library.cover_path(&meta.id);
+            if local_cache.exists() {
+                cover_path = Some(local_cache);
+            } else if let Some(thumb_url) = &meta.thumbnail
+                && let Ok(resp) = shared_http_client().get(thumb_url).send().await
+                && let Ok(bytes) = resp.bytes().await
+                && let Ok(saved_path) = library.store_cover(&meta.id, &bytes)
+            {
+                cover_path = Some(saved_path);
+            }
+            play_with_metadata(
+                target_query,
+                meta,
+                cover_path,
+                extractor,
+                player,
+                smtc,
+                ui_weak,
+                queue,
+                library,
+                last_query,
+            )
+            .await;
+            return;
+        }
+
         info!("Resolving stream metadata for query: {}", target_query);
         let extracted = extractor.extract_audio(&target_query).await;
 
         match extracted {
             Ok(mut meta) => {
+                // Auto-cache favorites in background so subsequent replays never need streaming
+                if library.is_favorite(&meta.id) && library.find_cached_audio(&meta.id).is_none() {
+                    let extractor_bg = Arc::clone(&extractor);
+                    let cache_dir = library.audio_cache_dir();
+                    let track_id = meta.id.clone();
+                    let ui_weak_refresh = ui_weak.clone();
+                    let queue_refresh = queue.clone();
+                    let library_refresh = library.clone();
+                    tokio::spawn(async move {
+                        if let Ok(_) =
+                            extractor_bg.download_audio_track(&track_id, &cache_dir).await
+                        {
+                            let _ = ui_weak_refresh.upgrade_in_event_loop(move |ui| {
+                                sync_queue_to_ui(&ui, &queue_refresh, &library_refresh);
+                            });
+                        }
+                    });
+                }
                 if meta.start_offset_secs == 0.0 && requested_offset_secs > 0.0 {
                     meta.start_offset_secs = requested_offset_secs;
                 }

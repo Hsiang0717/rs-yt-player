@@ -330,6 +330,39 @@ impl LibraryStore {
         self.save_locked(&data);
     }
 
+    pub fn audio_cache_dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("audio_cache")
+    }
+
+    pub fn find_cached_audio(&self, id: &str) -> Option<PathBuf> {
+        let safe_id: String = id
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+            .collect();
+        if safe_id.is_empty() {
+            return None;
+        }
+        let dir = self.audio_cache_dir();
+        for ext in &["m4a", "webm", "opus", "mp3"] {
+            let candidate = dir.join(format!("{}.{}", safe_id, ext));
+            if candidate.is_file() {
+                if let Ok(meta) = std::fs::metadata(&candidate) {
+                    if meta.len() > 1024 {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn is_audio_cached(&self, id: &str) -> bool {
+        self.find_cached_audio(id).is_some()
+    }
+
     pub fn cover_path(&self, id: &str) -> PathBuf {
         let safe_id: String = id
             .chars()
@@ -365,6 +398,7 @@ impl LibraryStore {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .join("covers");
+        let audio_dir = self.audio_cache_dir();
         let favorite_ids: std::collections::HashSet<String> = self
             .favorites()
             .into_iter()
@@ -389,36 +423,76 @@ impl LibraryStore {
             }
 
             // 2. Evict oldest non-favorite cover files if count exceeds max_covers
-            if !covers_dir.exists() {
-                return;
-            }
-            let Ok(entries) = std::fs::read_dir(&covers_dir) else {
-                return;
-            };
-            let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
-                .flatten()
-                .filter_map(|entry| {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("png") {
-                        return None;
-                    }
-                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                    if favorite_ids.contains(stem) {
-                        return None;
-                    }
-                    let modified = entry
-                        .metadata()
-                        .and_then(|m| m.modified())
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                    Some((path, modified))
-                })
-                .collect();
+            if covers_dir.exists()
+                && let Ok(entries) = std::fs::read_dir(&covers_dir)
+            {
+                let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
+                    .flatten()
+                    .filter_map(|entry| {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) != Some("png") {
+                            return None;
+                        }
+                        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                        if favorite_ids.contains(stem) {
+                            return None;
+                        }
+                        let modified = entry
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        Some((path, modified))
+                    })
+                    .collect();
 
-            if files.len() > max_covers {
-                files.sort_by_key(|(_, modified)| *modified);
-                let to_remove = files.len() - max_covers;
-                for (path, _) in files.into_iter().take(to_remove) {
-                    let _ = std::fs::remove_file(path);
+                if files.len() > max_covers {
+                    files.sort_by_key(|(_, modified)| *modified);
+                    let to_remove = files.len() - max_covers;
+                    for (path, _) in files.into_iter().take(to_remove) {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
+
+            // 3. Audio Cache: clean temporary/part files and enforce LRU budget (3GB) on non-favorites
+            const MAX_AUDIO_CACHE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+            if audio_dir.exists()
+                && let Ok(entries) = std::fs::read_dir(&audio_dir)
+            {
+                let mut audio_files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+                let mut total_bytes: u64 = 0;
+
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    // Remove incomplete / part downloads older than 1 hour or immediate cleanup
+                    if name.ends_with(".part") || name.ends_with(".downloading") || name.ends_with(".ytdl") {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+
+                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    let Ok(meta) = entry.metadata() else { continue };
+                    let size = meta.len();
+                    total_bytes = total_bytes.saturating_add(size);
+
+                    // Pinned favorites are never evicted
+                    if !favorite_ids.contains(stem) {
+                        let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        audio_files.push((path, size, modified));
+                    }
+                }
+
+                if total_bytes > MAX_AUDIO_CACHE_BYTES {
+                    audio_files.sort_by_key(|(_, _, modified)| *modified);
+                    for (path, size, _) in audio_files {
+                        if total_bytes <= MAX_AUDIO_CACHE_BYTES {
+                            break;
+                        }
+                        if std::fs::remove_file(&path).is_ok() {
+                            total_bytes = total_bytes.saturating_sub(size);
+                        }
+                    }
                 }
             }
         });
@@ -526,5 +600,26 @@ mod tests {
     fn formats_multi_hour_and_standard_durations() {
         assert_eq!(format_duration_secs(65.0), "01:05");
         assert_eq!(format_duration_secs(11142.0), "03:05:42");
+    }
+
+    #[test]
+    fn audio_cache_detection_and_path_resolution() {
+        let temp = TempLibraryDir::new();
+        let path = temp.0.join("library.json");
+        let store = LibraryStore::load_from_path(path);
+        let cache_dir = store.audio_cache_dir();
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        assert!(!store.is_audio_cached("test_track_1"));
+
+        // Create a dummy cached file (> 1024 bytes)
+        let dummy_file = cache_dir.join("test_track_1.m4a");
+        std::fs::write(&dummy_file, vec![0u8; 2048]).unwrap();
+
+        assert!(store.is_audio_cached("test_track_1"));
+        assert_eq!(
+            store.find_cached_audio("test_track_1"),
+            Some(dummy_file)
+        );
     }
 }

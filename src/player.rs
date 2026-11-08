@@ -326,6 +326,99 @@ impl AudioPlayer {
         Ok(())
     }
 
+    pub fn play_file_from(
+        &self,
+        path: &std::path::Path,
+        offset_secs: f32,
+        duration_secs: f32,
+    ) -> Result<()> {
+        self.stop();
+
+        let loudness_gain = *self.loudness_gain.lock().unwrap();
+        info!(
+            "Starting native audio from local cache: {:?} from {:.1}s (loudness_gain={:.2})...",
+            path, offset_secs, loudness_gain
+        );
+
+        let source = DecodedAudioSource::new_from_file(path, offset_secs)?
+            .with_loudness_gain(loudness_gain);
+
+        let total_size = std::fs::metadata(path).ok().map(|m| m.len());
+        *self.current_stream_total_size.lock().unwrap() = total_size;
+
+        let consumed_samples = source.consumed_samples();
+        let samples_per_sec = source.samples_per_second();
+
+        *self.buffer_stats.lock().unwrap() = None;
+        *self.range_buffer_stats.lock().unwrap() = None;
+
+        {
+            let mut timing = self.timing.lock().unwrap();
+            timing.base_offset_secs = offset_secs;
+            timing.start_instant = Some(Instant::now());
+            timing.total_duration_secs = duration_secs;
+            timing.is_paused = false;
+            timing.consumed_samples = Some(consumed_samples);
+            timing.samples_per_sec = samples_per_sec;
+        }
+
+        let sink_lock = self.sink.lock().unwrap();
+        sink_lock.clear();
+        sink_lock.append(source);
+        sink_lock.set_volume(self.effective_volume());
+        *self.current_stream_url.lock().unwrap() = Some(path.to_string_lossy().to_string());
+        *self.current_stream_headers.lock().unwrap() = None;
+        sink_lock.play();
+        info!("Audio playback from local cache successfully started.");
+
+        Ok(())
+    }
+
+    pub fn seek_file_to(
+        &self,
+        path: &std::path::Path,
+        offset_secs: f32,
+        duration_secs: f32,
+    ) -> Result<()> {
+        let loudness_gain = *self.loudness_gain.lock().unwrap();
+        info!("Seeking local audio file to {:.1}s...", offset_secs);
+
+        let source = DecodedAudioSource::new_from_file(path, offset_secs)?
+            .with_loudness_gain(loudness_gain);
+
+        if let Ok(mut proc_lock) = self.current_process.lock() {
+            if let Some(mut old_child) = proc_lock.take() {
+                let _ = old_child.kill();
+                let _ = old_child.wait();
+            }
+        }
+
+        let consumed_samples = source.consumed_samples();
+        let samples_per_sec = source.samples_per_second();
+
+        *self.buffer_stats.lock().unwrap() = None;
+        *self.range_buffer_stats.lock().unwrap() = None;
+
+        {
+            let mut timing = self.timing.lock().unwrap();
+            timing.base_offset_secs = offset_secs;
+            timing.start_instant = Some(Instant::now());
+            timing.total_duration_secs = duration_secs;
+            timing.is_paused = false;
+            timing.consumed_samples = Some(consumed_samples);
+            timing.samples_per_sec = samples_per_sec;
+        }
+
+        let sink_lock = self.sink.lock().unwrap();
+        sink_lock.clear();
+        sink_lock.append(source);
+        sink_lock.set_volume(self.effective_volume());
+        sink_lock.play();
+
+        info!("Audio seek to {:.1}s (local file) successfully applied.", offset_secs);
+        Ok(())
+    }
+
     /// Internal seamless seek that prepares the new range source first before swapping sink
     pub fn seek_stream_to(
         &self,
@@ -421,7 +514,12 @@ impl AudioPlayer {
 
         if let Some(url) = stream_url {
             let total_dur = self.timing.lock().unwrap().total_duration_secs;
-            self.seek_stream_to(&url, request_headers, total_size, target_secs, total_dur)?;
+            let path = std::path::Path::new(&url);
+            if path.is_file() {
+                self.seek_file_to(path, target_secs, total_dur)?;
+            } else {
+                self.seek_stream_to(&url, request_headers, total_size, target_secs, total_dur)?;
+            }
         }
 
         Ok(())
@@ -441,6 +539,23 @@ impl AudioPlayer {
     }
 
     pub fn resume(&self) {
+        let is_local_file = self
+            .current_stream_url
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(|url| std::path::Path::new(url).is_file())
+            .unwrap_or(false);
+
+        if is_local_file {
+            self.sink.lock().unwrap().play();
+            let mut timing = self.timing.lock().unwrap();
+            timing.start_instant = Some(Instant::now());
+            timing.is_paused = false;
+            info!("Resumed local file playback at {:.1}s.", timing.base_offset_secs);
+            return;
+        }
+
         let is_expired = self
             .current_stream_url
             .lock()
