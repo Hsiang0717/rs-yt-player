@@ -10,8 +10,8 @@ use crate::player::AudioPlayer;
 use crate::queue::PlayQueue;
 use crate::smtc::SmtcManager;
 use crate::ui_models::{
-    apply_queue_expanded, load_cached_cover_image, queue_items_model, record_from_audio,
-    records_model, requested_video_id,
+    apply_queue_expanded, load_cached_cover_image, record_from_audio, records_model,
+    requested_video_id, sync_queue_to_ui,
 };
 
 pub mod transport;
@@ -157,7 +157,7 @@ pub async fn play_with_metadata(
                     &library_for_ui,
                     Some(&canon_key),
                 ));
-                ui.set_queue_items(queue_items_model(&queue_for_ui, &library_for_ui));
+                sync_queue_to_ui(&ui, &queue_for_ui, &library_for_ui);
                 ui.set_panel_message(slint::SharedString::default());
             }
             _ => {
@@ -170,6 +170,7 @@ pub async fn play_with_metadata(
                     playback_error.unwrap_or_else(|| "Playback could not start".into()),
                 ));
                 ui.set_current_track_key(slint::SharedString::default());
+                ui.set_current_queue_index(-1);
                 ui.set_current_is_favorite(false);
                 ui.set_has_cover(false);
                 ui.set_progress_ratio(0.0);
@@ -254,7 +255,7 @@ pub async fn play_track(
         let queue_for_ui = queue.clone();
         let library_for_ui = library.clone();
         let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-            ui.set_queue_items(queue_items_model(&queue_for_ui, &library_for_ui));
+            sync_queue_to_ui(&ui, &queue_for_ui, &library_for_ui);
             if queue_expanded {
                 apply_queue_expanded(&ui, true);
             }
@@ -309,7 +310,7 @@ pub async fn play_track(
                     let q_ui = queue.clone();
                     let l_ui = library.clone();
                     let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                        ui.set_queue_items(queue_items_model(&q_ui, &l_ui));
+                        sync_queue_to_ui(&ui, &q_ui, &l_ui);
                         ui.set_panel_message(slint::SharedString::from(
                             "Skipped unavailable track; advancing to next...",
                         ));

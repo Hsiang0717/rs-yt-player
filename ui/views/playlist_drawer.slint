@@ -8,9 +8,36 @@ export component PlaylistDrawerView inherits Rectangle {
     in property <string> panel_tab: "PLAYLIST";
     in property <string> panel_message: "";
     in property <bool> is_loading: false;
+    in property <int> current_queue_index: -1;
     in property <[TrackRow]> search_results: [];
     in property <[TrackRow]> queue_items: [];
     in property <[TrackRow]> favorite_items: [];
+
+    in-out property <length> playlist_scroll_y: 0px;
+
+    public function scroll_to_current() {
+        if root.current_queue_index >= 0 {
+            root.playlist_scroll_y = - Math.max(0px, root.current_queue_index * 44px - Math.max(0px, (root.height - 48px - 44px) / 2));
+        }
+    }
+
+    init => {
+        if root.panel_tab == "PLAYLIST" {
+            root.scroll_to_current();
+        }
+    }
+
+    changed current_queue_index => {
+        if root.panel_tab == "PLAYLIST" {
+            root.scroll_to_current();
+        }
+    }
+
+    changed panel_tab => {
+        if root.panel_tab == "PLAYLIST" {
+            root.scroll_to_current();
+        }
+    }
 
     callback background_clicked();
     callback select_panel_tab(string);
@@ -71,11 +98,28 @@ export component PlaylistDrawerView inherits Rectangle {
 
                 tab_touch := TouchArea {
                     mouse-cursor: pointer;
-                    clicked => { root.select_panel_tab(tab); }
+                    clicked => {
+                        root.select_panel_tab(tab);
+                        if tab == "PLAYLIST" {
+                            root.scroll_to_current();
+                        }
+                    }
                 }
             }
 
             Rectangle { horizontal-stretch: 1; }
+
+            // Locate Current Track Button
+            if root.panel_tab == "PLAYLIST" && root.current_queue_index >= 0 && root.queue_items.length > 0: IconButton {
+                width: 26px;
+                height: 26px;
+                y: (parent.height - self.height) / 2;
+                icon: @image-url("../icons/locate.svg");
+                icon_size: 14px;
+                default_color: Theme.accent_primary;
+                hover_color: Theme.accent_primary_hover;
+                clicked => { root.scroll_to_current(); }
+            }
 
             // Add All to Playlist Icon Button (for SEARCH / SAVED)
             if (root.panel_tab == "SEARCH" && root.search_results.length > 0) ||
@@ -137,8 +181,10 @@ export component PlaylistDrawerView inherits Rectangle {
         }
 
         // --- Playlist ---
-        if root.panel_tab == "PLAYLIST" && root.queue_items.length > 0: ListView {
+        if root.panel_tab == "PLAYLIST" && root.queue_items.length > 0: playlist_list := ListView {
             vertical-stretch: 1;
+            content-y <=> root.playlist_scroll_y;
+            animate content-y { duration: 250ms; easing: ease-out; }
             for item[index] in root.queue_items: TrackItemView {
                 item: item;
                 index: index;

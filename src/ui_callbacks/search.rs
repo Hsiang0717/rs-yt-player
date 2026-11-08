@@ -8,8 +8,8 @@ use crate::AppWindow;
 use crate::extractor::shared_http_client;
 use crate::library::TrackRecord;
 use crate::ui_models::{
-    apply_queue_expanded, cache_track_cover, is_url, query_video_id, queue_items_model,
-    record_from_search, records_model,
+    apply_queue_expanded, cache_track_cover, is_url, query_video_id, record_from_search,
+    records_model, sync_queue_to_ui,
 };
 
 use super::PlaybackContext;
@@ -235,7 +235,7 @@ pub fn bind_search_controls(
         queue_for_add.push_back(key);
         library_for_add.save_queue(queue_for_add.to_track_records());
         if let Some(ui) = ui_weak_add.upgrade() {
-            ui.set_queue_items(queue_items_model(&queue_for_add, &library_for_add));
+            sync_queue_to_ui(&ui, &queue_for_add, &library_for_add);
             ui.set_panel_message(slint::SharedString::from(format!(
                 "Added \"{}\" to playlist",
                 record.title
@@ -265,7 +265,7 @@ pub fn bind_search_controls(
         queue_for_next.push_front(key);
         library_for_next.save_queue(queue_for_next.to_track_records());
         if let Some(ui) = ui_weak_next.upgrade() {
-            ui.set_queue_items(queue_items_model(&queue_for_next, &library_for_next));
+            sync_queue_to_ui(&ui, &queue_for_next, &library_for_next);
             ui.set_panel_message(slint::SharedString::from(format!(
                 "Playing next: \"{}\"",
                 record.title
@@ -293,7 +293,7 @@ pub fn bind_search_controls(
                     &library_for_toggle,
                     Some(&curr_key),
                 ));
-                ui.set_queue_items(queue_items_model(&queue_for_toggle, &library_for_toggle));
+                sync_queue_to_ui(&ui, &queue_for_toggle, &library_for_toggle);
                 if curr_key == key || curr_key.contains(&query_video_id(&key)) {
                     ui.set_current_is_favorite(is_fav);
                 }
@@ -328,10 +328,11 @@ pub fn bind_search_controls(
                 .library
                 .save_queue(ctx_for_play.queue.to_track_records());
             if let Some(ui) = ctx_for_play.ui_weak.upgrade() {
-                ui.set_queue_items(queue_items_model(
+                sync_queue_to_ui(
+                    &ui,
                     &ctx_for_play.queue,
                     &ctx_for_play.library,
-                ));
+                );
             }
         }
         ctx_for_play.start_track(key_str, false);

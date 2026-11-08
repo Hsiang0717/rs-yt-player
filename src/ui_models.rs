@@ -168,6 +168,19 @@ pub fn queue_items_model(queue: &PlayQueue, library: &LibraryStore) -> slint::Mo
     slint::ModelRc::new(slint::VecModel::from(rows))
 }
 
+pub fn current_queue_index(queue: &PlayQueue) -> i32 {
+    if queue.current_query().is_some() {
+        queue.current_index().map(|idx| idx as i32).unwrap_or(-1)
+    } else {
+        -1
+    }
+}
+
+pub fn sync_queue_to_ui(ui: &AppWindow, queue: &PlayQueue, library: &LibraryStore) {
+    ui.set_queue_items(queue_items_model(queue, library));
+    ui.set_current_queue_index(current_queue_index(queue));
+}
+
 pub fn apply_queue_expanded(ui: &AppWindow, expanded: bool) {
     let current_size = ui.window().size().to_logical(ui.window().scale_factor());
     let logical_w = current_size.width.max(540.0);

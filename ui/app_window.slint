@@ -55,6 +55,7 @@ export component AppWindow inherits Window {
     in-out property <string> repeat_mode_label: "REPEAT OFF";
     in-out property <bool> can_retry: false;
     in-out property <string> current_track_key: "";
+    in-out property <int> current_queue_index: -1;
     in-out property <bool> current_is_favorite: false;
     in-out property <string> search_query: "";
 
@@ -217,6 +218,7 @@ export component AppWindow inherits Window {
                 panel_tab: root.panel_tab;
                 panel_message: root.panel_message;
                 is_loading: root.is_loading;
+                current_queue_index: root.current_queue_index;
                 search_results: root.search_results;
                 queue_items: root.queue_items;
                 favorite_items: root.favorite_items;

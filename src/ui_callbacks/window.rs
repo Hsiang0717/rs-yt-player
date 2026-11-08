@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use crate::AppWindow;
 use crate::library::LibraryStore;
 use crate::queue::PlayQueue;
-use crate::ui_models::{apply_queue_expanded, queue_items_model};
+use crate::ui_models::{apply_queue_expanded, sync_queue_to_ui};
 use slint::ComponentHandle;
 
 pub fn bind_window_controls(
@@ -66,7 +66,7 @@ pub fn bind_navigation_controls(app: &AppWindow, queue: PlayQueue, library: Libr
             apply_queue_expanded(&ui, expanded);
             library_for_toggle.set_queue_expanded(expanded);
             if expanded {
-                ui.set_queue_items(queue_items_model(&queue_for_toggle, &library_for_toggle));
+                sync_queue_to_ui(&ui, &queue_for_toggle, &library_for_toggle);
             }
         }
     });

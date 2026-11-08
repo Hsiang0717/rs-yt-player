@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::AppWindow;
 use crate::playback_coordinator::{play_track, play_with_metadata};
-use crate::ui_models::queue_items_model;
+use crate::ui_models::sync_queue_to_ui;
 
 use super::{PlaybackContext, SleepTimerMode};
 
@@ -91,7 +91,7 @@ pub fn bind_queue_controls(
         if queue_for_remove.remove_playlist_item(index as usize).is_some() {
             library_for_remove.save_queue(queue_for_remove.to_track_records());
             if let Some(ui) = ui_weak_remove.upgrade() {
-                ui.set_queue_items(queue_items_model(&queue_for_remove, &library_for_remove));
+                sync_queue_to_ui(&ui, &queue_for_remove, &library_for_remove);
                 ui.set_panel_message(slint::SharedString::from("Removed from playlist"));
             }
         }
@@ -105,7 +105,7 @@ pub fn bind_queue_controls(
         if index > 0 && queue_for_move_up.move_playlist_item(index, index - 1) {
             library_for_move_up.save_queue(queue_for_move_up.to_track_records());
             if let Some(ui) = ui_weak_move_up.upgrade() {
-                ui.set_queue_items(queue_items_model(&queue_for_move_up, &library_for_move_up));
+                sync_queue_to_ui(&ui, &queue_for_move_up, &library_for_move_up);
             }
         }
     });
@@ -118,10 +118,7 @@ pub fn bind_queue_controls(
         if queue_for_move_down.move_playlist_item(index, index + 1) {
             library_for_move_down.save_queue(queue_for_move_down.to_track_records());
             if let Some(ui) = ui_weak_move_down.upgrade() {
-                ui.set_queue_items(queue_items_model(
-                    &queue_for_move_down,
-                    &library_for_move_down,
-                ));
+                sync_queue_to_ui(&ui, &queue_for_move_down, &library_for_move_down);
             }
         }
     });
@@ -133,7 +130,7 @@ pub fn bind_queue_controls(
         queue_for_clear.clear();
         library_for_clear.save_queue(Vec::new());
         if let Some(ui) = ui_weak_clear.upgrade() {
-            ui.set_queue_items(queue_items_model(&queue_for_clear, &library_for_clear));
+            sync_queue_to_ui(&ui, &queue_for_clear, &library_for_clear);
             ui.set_panel_message(slint::SharedString::from("Playlist cleared"));
         }
     });
@@ -169,10 +166,11 @@ pub fn bind_queue_controls(
             .library
             .save_queue(ctx_for_item.queue.to_track_records());
         if let Some(ui) = ctx_for_item.ui_weak.upgrade() {
-            ui.set_queue_items(queue_items_model(
+            sync_queue_to_ui(
+                &ui,
                 &ctx_for_item.queue,
                 &ctx_for_item.library,
-            ));
+            );
         }
 
         let queue = ctx_for_item.queue.clone();

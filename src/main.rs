@@ -31,7 +31,7 @@ use tracing_subscriber::FmtSubscriber;
 use tray::SystemTray;
 use ui_callbacks::{PendingSeekState, SleepTimerMode, register_ui_callbacks};
 use ui_models::{
-    apply_queue_expanded, load_cached_cover_image, queue_items_model, records_model,
+    apply_queue_expanded, load_cached_cover_image, records_model, sync_queue_to_ui,
 };
 use win32_window::{acquire_single_instance, setup_windows_app_identity};
 use windows::Win32::Foundation::HWND;
@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
         &library,
         current_key.as_deref(),
     ));
-    app.set_queue_items(queue_items_model(&play_queue, &library));
+    sync_queue_to_ui(&app, &play_queue, &library);
 
     if library.queue_expanded() {
         apply_queue_expanded(&app, true);

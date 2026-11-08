@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::AppWindow;
 use crate::library::TrackRecord;
-use crate::ui_models::{query_video_id, queue_items_model, records_model};
+use crate::ui_models::{query_video_id, records_model, sync_queue_to_ui};
 
 use super::PlaybackContext;
 
@@ -47,10 +47,11 @@ pub fn bind_library_controls(
                 .library
                 .save_queue(ctx_for_play_fav.queue.to_track_records());
             if let Some(ui) = ctx_for_play_fav.ui_weak.upgrade() {
-                ui.set_queue_items(queue_items_model(
+                sync_queue_to_ui(
+                    &ui,
                     &ctx_for_play_fav.queue,
                     &ctx_for_play_fav.library,
-                ));
+                );
             }
             ctx_for_play_fav.start_track(url, false);
         } else {
@@ -86,10 +87,11 @@ pub fn bind_library_controls(
             .library
             .save_queue(ctx_for_enqueue_all.queue.to_track_records());
         if let Some(ui) = ctx_for_enqueue_all.ui_weak.upgrade() {
-            ui.set_queue_items(queue_items_model(
+            sync_queue_to_ui(
+                &ui,
                 &ctx_for_enqueue_all.queue,
                 &ctx_for_enqueue_all.library,
-            ));
+            );
             ui.set_panel_message(slint::SharedString::from(format!(
                 "Added {} tracks to playlist",
                 count
@@ -122,7 +124,7 @@ pub fn bind_library_controls(
                     &library_for_remove,
                     Some(&curr_key),
                 ));
-                ui.set_queue_items(queue_items_model(&queue_for_remove, &library_for_remove));
+                sync_queue_to_ui(&ui, &queue_for_remove, &library_for_remove);
                 ui.set_current_is_favorite(library_for_remove.is_favorite(&id));
                 ui.set_panel_message(slint::SharedString::from("Removed from favorites"));
             }
@@ -174,10 +176,11 @@ pub fn bind_library_controls(
                 &library_for_curr_fav,
                 Some(&curr_key),
             ));
-            ui.set_queue_items(queue_items_model(
+            sync_queue_to_ui(
+                &ui,
                 &queue_for_curr_fav,
                 &library_for_curr_fav,
-            ));
+            );
             let results = search_records_for_curr_fav.lock().unwrap().clone();
             ui.set_search_results(records_model(
                 results,

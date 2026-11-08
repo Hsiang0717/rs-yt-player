@@ -19,7 +19,7 @@ use crate::player::AudioPlayer;
 use crate::queue::PlayQueue;
 use crate::tray::SystemTray;
 use crate::ui_callbacks::{PendingSeekState, SleepTimerMode};
-use crate::ui_models::queue_items_model;
+use crate::ui_models::sync_queue_to_ui;
 use crate::win32_window::{
     check_default_audio_device_changed, is_window_visible, restore_from_tray, try_find_and_hook,
 };
@@ -399,7 +399,7 @@ pub fn start_playback_polling_timer(
                 if current_queue_display != queue_display_snapshot {
                     queue_display_snapshot = current_queue_display;
                     if let Some(ui) = ui_weak_timer.upgrade() {
-                        ui.set_queue_items(queue_items_model(&queue_for_timer, &library_for_timer));
+                        sync_queue_to_ui(&ui, &queue_for_timer, &library_for_timer);
                     }
                 }
             }

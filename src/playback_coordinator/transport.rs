@@ -9,7 +9,7 @@ use crate::library::{LibraryStore, RepeatMode, format_duration_secs};
 use crate::player::AudioPlayer;
 use crate::queue::PlayQueue;
 use crate::ui_callbacks::PendingSeekState;
-use crate::ui_models::queue_items_model;
+use crate::ui_models::sync_queue_to_ui;
 
 use super::{LoadingAbortHandle, SmtcHandle, play_track, play_with_metadata};
 
@@ -73,7 +73,7 @@ pub fn trigger_next(
         let q_ui = queue.clone();
         let l_ui = library.clone();
         let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-            ui.set_queue_items(queue_items_model(&q_ui, &l_ui));
+            sync_queue_to_ui(&ui, &q_ui, &l_ui);
         });
         let adv_lock = Arc::clone(&is_advancing);
         let abort_handle = loading_abort.clone();
@@ -175,7 +175,7 @@ pub fn trigger_previous(
         let q_ui = queue.clone();
         let l_ui = library.clone();
         let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-            ui.set_queue_items(queue_items_model(&q_ui, &l_ui));
+            sync_queue_to_ui(&ui, &q_ui, &l_ui);
         });
         let adv_lock = Arc::clone(&is_advancing);
         let abort_handle = loading_abort.clone();
