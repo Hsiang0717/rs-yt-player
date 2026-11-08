@@ -300,6 +300,7 @@ pub async fn play_track(
             && let Some(cached_file) = library.find_cached_audio(vid)
             && let Some(record) = library.find_track(vid)
         {
+            library.touch_cached_audio(vid);
             info!(
                 "Fast-path: playing cached audio {:?} without yt-dlp lookup",
                 cached_file
@@ -348,8 +349,8 @@ pub async fn play_track(
 
         match extracted {
             Ok(mut meta) => {
-                // Auto-cache favorites in background so subsequent replays never need streaming
-                if library.is_favorite(&meta.id) && library.find_cached_audio(&meta.id).is_none() {
+                // Auto-cache played track in background so subsequent replays never need streaming
+                if library.find_cached_audio(&meta.id).is_none() {
                     let extractor_bg = Arc::clone(&extractor);
                     let cache_dir = library.audio_cache_dir();
                     let track_id = meta.id.clone();
@@ -360,6 +361,7 @@ pub async fn play_track(
                         if let Ok(_) =
                             extractor_bg.download_audio_track(&track_id, &cache_dir).await
                         {
+                            library_refresh.prune_cache_async(300);
                             let _ = ui_weak_refresh.upgrade_in_event_loop(move |ui| {
                                 sync_queue_to_ui(&ui, &queue_refresh, &library_refresh);
                             });

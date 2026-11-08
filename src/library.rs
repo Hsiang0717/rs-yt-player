@@ -363,6 +363,15 @@ impl LibraryStore {
         self.find_cached_audio(id).is_some()
     }
 
+    pub fn touch_cached_audio(&self, id: &str) {
+        if let Some(path) = self.find_cached_audio(id) {
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(std::time::SystemTime::now()));
+        }
+    }
+
     pub fn cover_path(&self, id: &str) -> PathBuf {
         let safe_id: String = id
             .chars()
@@ -454,8 +463,9 @@ impl LibraryStore {
                 }
             }
 
-            // 3. Audio Cache: clean temporary/part files and enforce LRU budget (3GB) on non-favorites
+            // 3. Audio Cache: clean temporary/part files and enforce LRU budget (3GB or 200 non-favorite songs)
             const MAX_AUDIO_CACHE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+            const MAX_AUDIO_CACHE_COUNT: usize = 200;
             if audio_dir.exists()
                 && let Ok(entries) = std::fs::read_dir(&audio_dir)
             {
@@ -483,14 +493,16 @@ impl LibraryStore {
                     }
                 }
 
-                if total_bytes > MAX_AUDIO_CACHE_BYTES {
+                if total_bytes > MAX_AUDIO_CACHE_BYTES || audio_files.len() > MAX_AUDIO_CACHE_COUNT {
                     audio_files.sort_by_key(|(_, _, modified)| *modified);
+                    let mut remaining_count = audio_files.len();
                     for (path, size, _) in audio_files {
-                        if total_bytes <= MAX_AUDIO_CACHE_BYTES {
+                        if total_bytes <= MAX_AUDIO_CACHE_BYTES && remaining_count <= MAX_AUDIO_CACHE_COUNT {
                             break;
                         }
                         if std::fs::remove_file(&path).is_ok() {
                             total_bytes = total_bytes.saturating_sub(size);
+                            remaining_count = remaining_count.saturating_sub(1);
                         }
                     }
                 }
