@@ -1,0 +1,16 @@
+domain: smtc
+description: Business domain causal clusters for smtc
+
+clusters:
+  - cluster_id: flow_smtc_smtcmanager
+    summary: Integrates with Windows System Media Transport Controls (SMTC) using souvlaki/MediaControls to display OS media overlay metadata and capture hardware multimedia key events
+    entrypoint:
+      id: src/smtc.rs#L11-31
+      symbol: SmtcManager
+      anchor: "pub struct SmtcManager {"
+    chain: []
+    rules:
+      - 若主視窗尚未就緒必須建立不可見的 dummy Win32 HWND 作為 SMTC 事件載體
+      - Slint 主視窗 HWND 就緒後必須呼叫 rebind_hwnd 重新綁定，保證點擊系統媒體浮窗時聚焦正確視窗
+      - 必須緩存 last_metadata 與 last_playback，避免頻繁呼叫 WinRT API 引發 COM 效能抖動
+

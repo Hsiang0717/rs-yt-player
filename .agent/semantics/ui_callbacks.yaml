@@ -1,0 +1,102 @@
+domain: ui_callbacks
+description: Business domain causal clusters for ui_callbacks
+
+clusters:
+  - cluster_id: flow_ui_callbacks_pendingseekstate
+    summary: State tracking struct representing user scrub and seek interactions to synchronize slider dragging with audio playback
+    entrypoint:
+      id: src/ui_callbacks.rs#L73-93
+      symbol: PendingSeekState
+      anchor: "pub struct PendingSeekState {"
+    chain: []
+    rules:
+      - 用戶進行進度條拖曳（user_scrub）時，嚴格阻斷 Polling Timer 對進度條位置的覆寫
+      - 快進確認釋放（user_seek）後更新 target_secs 並非同步通知解碼線程
+
+  - cluster_id: flow_ui_callbacks_register_ui_callbacks
+    summary: Central registration hub attaching Slint UI callbacks to underlying domain subsystems (playback, search, queue, library, window controls)
+    entrypoint:
+      id: src/ui_callbacks.rs#L153-201
+      symbol: register_ui_callbacks
+      anchor: "pub fn register_ui_callbacks("
+    chain: []
+    rules:
+      - 所有 UI Callback 註冊必須在 Slint Event Loop 啟動前一次性完成
+      - 不可在 UI Callback 閉包中直接執行阻塞式 I/O，必須透過 tokio::spawn 派發至非同步線程池
+
+  - cluster_id: flow_ui_callbacks_bind_library_controls
+    summary: Binds user interaction callbacks for library tabs, favorites toggling, track favoriting, and enqueue-all operations
+    entrypoint:
+      id: src/ui_callbacks/library.rs#L22-215
+      symbol: bind_library_controls
+      anchor: "pub fn bind_library_controls("
+    chain: []
+    rules:
+      - 我的最愛增刪必須原子同步至 LibraryStore 磁碟持久化
+      - 批次加入佇列（enqueue_all）操作後必須調用 sync_queue_to_ui 即時更新畫面清單
+
+  - cluster_id: flow_ui_callbacks_bind_playback_controls
+    summary: Binds core transport controls play/pause, next track, previous track, stop, and loading abort
+    entrypoint:
+      id: src/ui_callbacks/playback.rs#L13-87
+      symbol: bind_playback_controls
+      anchor: "pub fn bind_playback_controls("
+    chain: []
+    rules:
+      - 點擊取消加載（cancel_loading）時必須中止 active loading handle 並重置 UI 狀態至 IDLE
+      - 播放控制回調必須調用 playback_coordinator 的防重入函式（trigger_next / trigger_previous）
+
+  - cluster_id: flow_ui_callbacks_bind_seek_and_volume_controls
+    summary: Binds timeline scrubbing, seek commit, and master volume adjustment sliders
+    entrypoint:
+      id: src/ui_callbacks/playback.rs#L89-200
+      symbol: bind_seek_and_volume_controls
+      anchor: "pub fn bind_seek_and_volume_controls("
+    chain: []
+    rules:
+      - 音量變更需同時調用 player.set_volume 與 library.set_volume 記憶音量設定
+      - 拖動時間滑桿時應即時計算格式化時間文字，給予使用者即時視覺反饋
+
+  - cluster_id: flow_ui_callbacks_bind_queue_controls
+    summary: Binds queue management callbacks repeat mode cycling, shuffle toggle, autoplay toggle, sleep timer cycling, item reordering, and item removal
+    entrypoint:
+      id: src/ui_callbacks/queue.rs#L9-229
+      symbol: bind_queue_controls
+      anchor: "pub fn bind_queue_controls("
+    chain: []
+    rules:
+      - 睡眠定時器模式循環時需同步更新 app_timer 狀態及 UI 標籤
+      - 調整佇列順序（上移/下移/移除）時必須正確處理當前播放索引偏移
+
+  - cluster_id: flow_ui_callbacks_bind_search_controls
+    summary: Binds search input debounce, direct URL parsing, search execution via yt-dlp, and result selection/enqueueing
+    entrypoint:
+      id: src/ui_callbacks/search.rs#L54-358
+      symbol: bind_search_controls
+      anchor: "pub fn bind_search_controls("
+    chain: []
+    rules:
+      - 搜尋回調必須採用 search_generation token 機制捨棄早先發起但過晚返回的舊搜尋結果
+      - 防抖（debounce）機制：400ms 內連續輸入不可發起重複 yt-dlp 查詢
+
+  - cluster_id: flow_ui_callbacks_bind_window_controls
+    summary: Binds custom frameless window management callbacks window drag, minimize, close to tray, and always-on-top pinning
+    entrypoint:
+      id: src/ui_callbacks/window.rs#L9-50
+      symbol: bind_window_controls
+      anchor: "pub fn bind_window_controls("
+    chain: []
+    rules:
+      - 無邊框拖拽回調中必須透過 Win32 ReleaseCapture 與 SendMessage(WM_NCLBUTTONDOWN) 觸發原生視窗拖動
+      - 關閉視窗預設行為應縮小至系統匣而不是直接結束程序
+
+  - cluster_id: flow_ui_callbacks_bind_navigation_controls
+    summary: Binds side navigation tab switches and queue side drawer expansion/collapse
+    entrypoint:
+      id: src/ui_callbacks/window.rs#L52-81
+      symbol: bind_navigation_controls
+      anchor: "pub fn bind_navigation_controls(app: &AppWindow, queue: PlayQueue, library: LibraryStore) {"
+    chain: []
+    rules:
+      - 切換面板時應呼叫 apply_queue_expanded 保持抽屜開闔動畫狀態同步
+

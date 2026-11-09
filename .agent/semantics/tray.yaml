@@ -1,0 +1,16 @@
+domain: tray
+description: Business domain causal clusters for tray
+
+clusters:
+  - cluster_id: flow_tray_systemtray
+    summary: Manages the Windows notification area (system tray) icon, right-click context menu commands (Show, Play/Pause, Next, Prev, Quit), and dynamic tooltip track info
+    entrypoint:
+      id: src/tray.rs#L7-27
+      symbol: SystemTray
+      anchor: "pub struct SystemTray {"
+    chain: []
+    rules:
+      - 初始化托盤時必須以 COINIT_APARTMENTTHREADED 模式呼叫 CoInitializeEx 以保證 Win32 消息循環相容
+      - 更新 Tooltip 與播放狀態菜單文字時必須比對快照，避免無意義的 Shell_NotifyIcon 呼叫
+      - 點擊系統匣 Quit 選單時必須發出優雅退出信號並保存當前狀態與視窗座標
+

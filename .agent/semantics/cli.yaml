@@ -1,0 +1,16 @@
+domain: cli
+description: Business domain causal clusters for cli
+
+clusters:
+  - cluster_id: flow_cli_run_cli_mode
+    summary: Executes headless command-line audio streaming, SMTC session diagnostics, or automated CI smoke testing without GUI initialization
+    entrypoint:
+      id: src/cli.rs#L7-190
+      symbol: run_cli_mode
+      anchor: "pub async fn run_cli_mode(raw_args: Vec<String>, is_smoke_test: bool) -> Result<()> {"
+    chain: []
+    rules:
+      - 冒煙測試（--smoke-test）模式下必須在確認音訊管道成功啟動後在時限內自動優雅退出
+      - 診斷模式（--inspect-smtc）必須安全查詢 Windows SMTC SessionManager 且不拋出 COM 例外
+      - CLI 終止時必須確保 yt-dlp 子行程及 Rodio 播放管道完全釋放
+

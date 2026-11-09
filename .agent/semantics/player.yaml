@@ -1,0 +1,27 @@
+domain: player
+description: Business domain causal clusters for player
+
+clusters:
+  - cluster_id: flow_player_loudness_db_to_gain
+    summary: Computes linear gain multiplier from YouTube loudness_db to achieve ReplayGain/EBU R128 loudness normalization without clipping
+    entrypoint:
+      id: src/player.rs#L18-24
+      symbol: loudness_db_to_gain
+      anchor: "pub fn loudness_db_to_gain(loudness_db: Option<f32>) -> f32 {"
+    chain: []
+    rules:
+      - 增益增幅必須設定上限（Clamp），防止過低響度影片引發極端音訊破音與削波（Clipping）
+      - 若 YouTube 未提供 loudness_db，預設返回 1.0 原生增益
+
+  - cluster_id: flow_player_audioplayer
+    summary: Core audio sink managing Rodio playback pipelines, track timing, dynamic gain adjustments, buffer polling, and playback state
+    entrypoint:
+      id: src/player.rs#L86-100
+      symbol: AudioPlayer
+      anchor: "pub struct AudioPlayer {"
+    chain: []
+    rules:
+      - 音訊設備發生變更或斷開時必須安全捕獲並重建 Rodio OutputStream
+      - 播放時間（current_position）計算必須結合基準偏移（start_offset）與 Sink 實際播放時長
+      - 暫停與繼續時必須維持 Sink 同步，避免底層音訊緩衝區產生雜音（pop/crackle）
+
