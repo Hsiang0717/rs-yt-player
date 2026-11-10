@@ -43,6 +43,7 @@ export component PlaylistDrawerView inherits Rectangle {
     callback select_panel_tab(string);
     callback clear_queue();
     callback enqueue_all(string);
+    callback favorite_all();
 
     callback play_search_result(string);
     callback play_next_track(string);
@@ -119,6 +120,18 @@ export component PlaylistDrawerView inherits Rectangle {
                 default_color: Theme.accent_primary;
                 hover_color: Theme.accent_primary_hover;
                 clicked => { root.scroll_to_current(); }
+            }
+
+            // Favorite All in Playlist Button (一鍵收藏)
+            if root.panel_tab == "PLAYLIST" && root.queue_items.length > 0: IconButton {
+                width: 26px;
+                height: 26px;
+                y: (parent.height - self.height) / 2;
+                icon: @image-url("../icons/heart.svg");
+                icon_size: 14px;
+                default_color: Theme.accent_gold;
+                hover_color: Theme.accent_gold_hover;
+                clicked => { root.favorite_all(); }
             }
 
             // Add All to Playlist Icon Button (for SEARCH / SAVED)

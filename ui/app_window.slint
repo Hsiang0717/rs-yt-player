@@ -73,6 +73,7 @@ export component AppWindow inherits Window {
     callback enqueue_search_result(string);
     callback play_next_in_queue(string);
     callback enqueue_all(string);
+    callback favorite_all();
     callback toggle_search_favorite(string);
     callback play_queue_item(int);
     callback remove_queue_item(int);
@@ -227,6 +228,7 @@ export component AppWindow inherits Window {
                 select_panel_tab(tab) => { root.select_panel_tab(tab); }
                 clear_queue => { root.clear_queue(); }
                 enqueue_all(tab) => { root.enqueue_all(tab); }
+                favorite_all => { root.favorite_all(); }
 
                 play_search_result(k) => { root.play_search_result(k); }
                 play_next_track(k) => { root.play_next_in_queue(k); }

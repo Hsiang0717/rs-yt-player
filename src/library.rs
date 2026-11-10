@@ -209,6 +209,26 @@ impl LibraryStore {
         }
     }
 
+    /// Add multiple tracks to favorites if they are not already favorited.
+    /// Newly added tracks are prepended at the head of favorites in their original playlist order.
+    /// Returns the list of newly added tracks.
+    pub fn add_favorites(&self, tracks: Vec<TrackRecord>) -> Vec<TrackRecord> {
+        let mut data = self.data.lock().unwrap();
+        let mut added = Vec::new();
+        for track in tracks {
+            if !track.id.is_empty() && !data.favorites.iter().any(|saved| saved.id == track.id) {
+                added.push(track);
+            }
+        }
+        if !added.is_empty() {
+            for track in added.iter().rev() {
+                data.favorites.insert(0, track.clone());
+            }
+            self.save_locked(&data);
+        }
+        added
+    }
+
     pub fn record_played(&self, track: TrackRecord) {
         let mut data = self.data.lock().unwrap();
         data.recent.retain(|saved| saved.id != track.id);
@@ -633,5 +653,39 @@ mod tests {
             store.find_cached_audio("test_track_1"),
             Some(dummy_file)
         );
+    }
+
+    #[test]
+    fn batch_add_favorites_deduplicates_and_preserves_order() {
+        let temp = TempLibraryDir::new();
+        let path = temp.0.join("library.json");
+        let store = LibraryStore::load_from_path(path.clone());
+
+        // Pre-populate with one favorite
+        store.toggle_favorite(sample_track("track-2"));
+
+        // Batch add [track-1, track-2, track-3]
+        let batch = vec![
+            sample_track("track-1"),
+            sample_track("track-2"), // already exists
+            sample_track("track-3"),
+        ];
+        let added = store.add_favorites(batch);
+        assert_eq!(added.len(), 2);
+        assert_eq!(added[0].id, "track-1");
+        assert_eq!(added[1].id, "track-3");
+
+        // Favorites should have newly added tracks prepended in original order
+        let favs = store.favorites();
+        assert_eq!(favs.len(), 3);
+        assert_eq!(favs[0].id, "track-1");
+        assert_eq!(favs[1].id, "track-3");
+        assert_eq!(favs[2].id, "track-2");
+
+        // Adding all duplicates returns empty vec
+        let second_batch = vec![sample_track("track-1"), sample_track("track-3")];
+        let added2 = store.add_favorites(second_batch);
+        assert!(added2.is_empty());
+        assert_eq!(store.favorites().len(), 3);
     }
 }
