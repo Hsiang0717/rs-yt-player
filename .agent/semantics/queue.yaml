@@ -1,0 +1,45 @@
+domain: queue
+description: Business domain causal clusters for queue
+
+clusters:
+  - cluster_id: flow_queue_canonical_query
+    summary: Normalizes YouTube video URLs and search queries into canonical identifier strings to avoid duplicate queue entries
+    entrypoint:
+      id: src/queue.rs#L28-36
+      symbol: canonical_query
+      anchor: "pub fn canonical_query(query: &str) -> String {"
+    chain: []
+    rules:
+      - 剝離 URL 中的追蹤與非必要參數（如 feature, si, time offset），僅保留乾淨的 query 或 video ID
+
+  - cluster_id: flow_queue_preloadedtrack
+    summary: Holds preloaded track metadata and pre-resolved stream URLs to enable fast next-track switching
+    entrypoint:
+      id: src/queue.rs#L43-63
+      symbol: PreloadedTrack
+      anchor: "pub struct PreloadedTrack {"
+    chain: []
+    rules:
+      - 預載音軌有過期時間（TTL），過期的預載 URL 必須在播放前重新驗證有效性
+
+  - cluster_id: flow_queue_queueitem
+    summary: Data structure representing an individual song entry in the play queue with title, artist, duration, and thumbnail URL
+    entrypoint:
+      id: src/queue.rs#L251-257
+      symbol: QueueItem
+      anchor: "..QueueItem::default()"
+    chain: []
+    rules:
+      - 預設標題若未解析應顯示原始 query，待 metadata 提取成功後原地覆寫
+
+  - cluster_id: flow_queue_playqueue
+    summary: Thread-safe playlist queue coordinator supporting shuffle, repeat modes, item reordering, deduplication, and next-track lookahead
+    entrypoint:
+      id: src/queue.rs#L567-576
+      symbol: PlayQueue
+      anchor: "let queue = PlayQueue::new();"
+    chain: []
+    rules:
+      - 開啟隨機播放（Shuffle）時必須維護原始順序與隨機映射，關閉時無損還原
+      - 刪除或重排項目時必須原子校正 current_index 游標位置，不可造成索引越界 panic
+

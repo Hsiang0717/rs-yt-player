@@ -1,0 +1,17 @@
+domain: app_timer
+description: Business domain causal clusters for app_timer
+
+clusters:
+  - cluster_id: flow_app_timer_start_playback_polling_timer
+    summary: Initializes a 100ms Slint polling timer coordinating playback progress, position persistence, sleep/resume transitions, SMTC media controls, tray events, audio device changes, and track auto-advance
+    entrypoint:
+      id: src/app_timer.rs#L29-558
+      symbol: start_playback_polling_timer
+      anchor: "pub fn start_playback_polling_timer("
+    chain: []
+    rules:
+      - 視窗最小化至系統匣時應降低非必要 UI 更新頻率以降低背景 CPU 開銷
+      - 偵測到系統休眠（system_suspended）時必須自動暫停播放以防進度飄移
+      - 播放進度持久化必須進行時間節流（throttle），禁止每個 tick 頻繁寫入硬碟
+      - 使用者拖動進度條時（pending_seek）必須暫停由 Polling Timer 覆蓋 UI 播放時間顯示
+

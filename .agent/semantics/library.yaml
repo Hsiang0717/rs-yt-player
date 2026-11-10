@@ -1,0 +1,37 @@
+domain: library
+description: Business domain causal clusters for library
+
+clusters:
+  - cluster_id: flow_library_format_duration_secs
+    summary: Converts floating-point seconds into human-readable duration strings (mm:ss or hh:mm:ss) with negative zero clamping
+    entrypoint:
+      id: src/library.rs#L6-16
+      symbol: format_duration_secs
+      anchor: "pub fn format_duration_secs(seconds: f64) -> String {"
+    chain: []
+    rules:
+      - 秒數為負或 NaN 時必須鉗位至 00:00 防止 UI 格式化字串異常
+      - 超過 1 小時的音軌自動格式化為 hh:mm:ss 格式
+
+  - cluster_id: flow_library_trackrecord
+    summary: Persistent data model representing a cataloged audio track with metadata, favorite flag, play counter, and cached local cover path
+    entrypoint:
+      id: src/library.rs#L545-560
+      symbol: TrackRecord
+      anchor: "use super::{LibraryStore, RepeatMode, TrackRecord, format_duration_secs};"
+    chain: []
+    rules:
+      - 序列化時應容忍缺失欄位以保證向後相容舊版 library.json
+      - 藝術家欄位為空時應回退至 Unknown Artist
+
+  - cluster_id: flow_library_librarystore
+    summary: Thread-safe local JSON storage manager persisting user play history, favorites, window dimensions/coordinates, volume, and last played position
+    entrypoint:
+      id: src/library.rs#L585-612
+      symbol: LibraryStore
+      anchor: "let store = LibraryStore::load_from_path(path.clone());"
+    chain: []
+    rules:
+      - 磁碟寫入應採用原子替換（Atomic Write / Rename）模式防止意外斷電導致 JSON 檔案毀損
+      - 播放進度與視窗座標更新必須在內部實作變更節流（Throttling），避免過度磁碟寫入
+

@@ -1,0 +1,74 @@
+domain: stream_reader
+description: Business domain causal clusters for stream_reader
+
+clusters:
+  - cluster_id: flow_stream_reader_bytecache
+    summary: In-memory chunk buffer caching HTTP media streams to prevent jitter and minimize network re-requests
+    entrypoint:
+      id: src/stream_reader/cache.rs#L8-28
+      symbol: ByteCache
+      anchor: "pub struct ByteCache {"
+    chain: []
+    rules:
+      - 緩存容量需受上限約束，防止高取樣率音訊長時間播放導致記憶體洩漏
+
+  - cluster_id: flow_stream_reader_decodedaudiosource
+    summary: Symphonia-powered audio stream decoder translating WebM/Opus, M4A/AAC into raw PCM f32 samples for Rodio playback
+    entrypoint:
+      id: src/stream_reader/decoder.rs#L24-44
+      symbol: DecodedAudioSource
+      anchor: "pub struct DecodedAudioSource {"
+    chain: []
+    rules:
+      - 解碼器必須正確處理可變取樣率與聲道映射，防止播放雜音
+
+  - cluster_id: flow_stream_reader_seekablefilesource
+    summary: Local filesystem audio source providing standard Seek and Read implementations for cached tracks
+    entrypoint:
+      id: src/stream_reader/decoder.rs#L145-146
+      symbol: SeekableFileSource
+      anchor: "let source = SeekableFileSource::open(path)"
+    chain: []
+    rules:
+      - 本機檔案必須以唯讀共享模式開啟，避免與其他並行讀取衝突
+
+  - cluster_id: flow_stream_reader_is_url_expired
+    summary: Inspects YouTube video stream URL expiration timestamp (expire parameter) against current epoch time
+    entrypoint:
+      id: src/stream_reader/http.rs#L13-26
+      symbol: is_url_expired
+      anchor: "pub fn is_url_expired(url: &str) -> bool {"
+    chain: []
+    rules:
+      - 判定到期時間時必須加入 60 秒前置冗餘安全緩衝，預防解碼途中連線遭 YouTube 伺服器終止
+
+  - cluster_id: flow_stream_reader_httpstreamreader
+    summary: HTTP streaming adapter handling segmented range downloads and auto-reconnect on network interruptions
+    entrypoint:
+      id: src/stream_reader/http.rs#L52-72
+      symbol: HttpStreamReader
+      anchor: "pub struct HttpStreamReader {"
+    chain: []
+    rules:
+      - 遭遇 HTTP 403 或 410 時立即標記 URL 到期，通知協調器刷新串流地址
+
+  - cluster_id: flow_stream_reader_rangebufferstats
+    summary: Real-time telemetry tracking range buffering progress, buffered seconds, and throughput
+    entrypoint:
+      id: src/stream_reader/range_source.rs#L24-44
+      symbol: RangeBufferStats
+      anchor: "pub struct RangeBufferStats {"
+    chain: []
+    rules:
+      - 統計計算需使用 Atomic 數值防止跨執行緒數據競爭
+
+  - cluster_id: flow_stream_reader_asyncrangemediasource
+    summary: Asynchronous media source supporting arbitrary seeking over remote HTTP streams via HTTP Range headers
+    entrypoint:
+      id: src/stream_reader/range_source.rs#L53-73
+      symbol: AsyncRangeMediaSource
+      anchor: "pub struct AsyncRangeMediaSource {"
+    chain: []
+    rules:
+      - 快進時必須及時取消前一個非同步 Range 下載請求，釋放 HTTP 連線資源
+

@@ -1,0 +1,95 @@
+domain: playback_coordinator
+description: Business domain causal clusters for playback_coordinator
+
+clusters:
+  - cluster_id: flow_playback_coordinator_play_with_metadata
+    summary: Plays an audio stream directly using pre-extracted metadata and cached cover image without invoking a redundant yt-dlp lookup
+    entrypoint:
+      id: src/playback_coordinator.rs#L29-197
+      symbol: play_with_metadata
+      anchor: "pub async fn play_with_metadata("
+    chain: []
+    rules:
+      - 必須同步更新 PlayQueue、LibraryStore 與 SMTC 媒體元數據
+      - 若 metadata 帶有 start_offset_secs 且小於總長度，必須精確傳入 AudioPlayer 進行帶偏移量串流啟動
+      - 遇到串流錯誤時必須觸發自動重試或安全降級，避免 UI 卡死在 LOADING 狀態
+
+  - cluster_id: flow_playback_coordinator_play_track
+    summary: Full lifecycle track resolution and playback handling playlist unfolding, yt-dlp stream extraction, cover caching, audio playback initialization, and auto-recommendation fallback
+    entrypoint:
+      id: src/playback_coordinator.rs#L200-437
+      symbol: play_track
+      anchor: "pub async fn play_track("
+    chain: []
+    rules:
+      - 支援播放清單（list=）自動展開並優先加載第一首歌
+      - 連續失敗次數（CONSECUTIVE_FAILURES）超限時必須中止無限重試循環
+      - 非阻塞更新 Slint UI：所有跨執行緒 UI 狀態變更必須經由 upgrade_in_event_loop 派送
+
+  - cluster_id: flow_playback_coordinator_start_track_playback
+    summary: Asynchronous task launcher that aborts any active pending track extraction/loading and spawns a new play_track task
+    entrypoint:
+      id: src/playback_coordinator.rs#L439-466
+      symbol: start_track_playback
+      anchor: "pub fn start_track_playback("
+    chain: []
+    rules:
+      - 啟動新音軌前必須主動觸發前一個 loading_abort handle 取消先前的下載與解碼
+      - 不可在 Slint UI 執行緒直接阻塞執行 yt-dlp，必須由 Tokio runtime 非同步排程
+
+  - cluster_id: flow_playback_coordinator_trigger_next
+    summary: Handles playback progression to the next track according to RepeatMode (One, All, Off), shuffle order, or auto-play recommendation
+    entrypoint:
+      id: src/playback_coordinator/transport.rs#L28-128
+      symbol: trigger_next
+      anchor: "pub fn trigger_next("
+    chain: []
+    rules:
+      - 必須透過 is_advancing 互斥鎖嚴格防範連續觸發（double-advance race condition）
+      - 自然播放完畢（natural_end）且 RepeatMode::One 時應原地重播當前歌曲
+      - 佇列為空且開啟 Autoplay 時，自動抽取推薦相關歌曲加入佇列
+
+  - cluster_id: flow_playback_coordinator_trigger_previous
+    summary: Handles previous track navigation with standard media player double-click threshold restarting current track if played > 3 seconds, or switching to previous track
+    entrypoint:
+      id: src/playback_coordinator/transport.rs#L134-204
+      symbol: trigger_previous
+      anchor: "pub fn trigger_previous("
+    chain: []
+    rules:
+      - 當前曲目播放超過 3 秒時，初次點擊上一首僅重置播放進度至開頭
+      - 2.5 秒內連續雙擊上一首才真正切換至佇列上一首曲目
+
+  - cluster_id: flow_playback_coordinator_trigger_toggle_play_pause
+    summary: Toggles playback between playing and paused, initializing audio stream if player was uninitialized or restarting from cached library position
+    entrypoint:
+      id: src/playback_coordinator/transport.rs#L230-390
+      symbol: trigger_toggle_play_pause
+      anchor: "pub fn trigger_toggle_play_pause("
+    chain: []
+    rules:
+      - 若播放器未加載任何音訊且佇列非空，應自動拉起首首或上次記憶之音軌
+      - 暫停或恢復時必須同步原子更新 UI is_playing 標誌與 Windows SMTC 播放狀態
+
+  - cluster_id: flow_playback_coordinator_trigger_seek_to_ratio
+    summary: Processes ratio-based user seek requests (0.0 to 1.0) on the timeline progress bar with seek sequencing
+    entrypoint:
+      id: src/playback_coordinator/transport.rs#L392-466
+      symbol: trigger_seek_to_ratio
+      anchor: "pub fn trigger_seek_to_ratio("
+    chain: []
+    rules:
+      - 拖動快進期間必須依賴 seek_seq 單調遞增序列，捨棄過時的陳舊 seek 請求
+      - 必須非同步取得 seek_lock 避免多個快進請求交錯造成 Rodio 緩衝區競態毀損
+
+  - cluster_id: flow_playback_coordinator_trigger_seek_to_secs
+    summary: Performs exact-second seeking on the currently loaded track
+    entrypoint:
+      id: src/playback_coordinator/transport.rs#L468-492
+      symbol: trigger_seek_to_secs
+      anchor: "pub fn trigger_seek_to_secs("
+    chain: []
+    rules:
+      - 目標秒數必須約束在 [0.0, total_duration] 範圍內防止溢位
+      - 若當前正在進行非同步載入，需更新 pending_seek 以便音訊啟動後立即跳转
+

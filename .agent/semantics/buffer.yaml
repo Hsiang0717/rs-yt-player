@@ -1,0 +1,24 @@
+domain: buffer
+description: Business domain causal clusters for buffer
+
+clusters:
+  - cluster_id: flow_buffer_bufferstats
+    summary: Atomic buffer metrics tracker measuring buffered byte progress, consumer read offsets, and download throughput
+    entrypoint:
+      id: src/buffer.rs#L18-38
+      symbol: BufferStats
+      anchor: "pub struct BufferStats {"
+    chain: []
+    rules:
+      - 統計更新必須採用 Atomic 原語，保證音訊解碼線程與 UI 輪詢線程之間無鎖併發讀寫
+
+  - cluster_id: flow_buffer_trackedaudiobuffer
+    summary: Audio stream read adapter wrapping Seek/Read streams to calculate real-time buffering ratios and underrun warnings
+    entrypoint:
+      id: src/buffer.rs#L201-211
+      symbol: TrackedAudioBuffer
+      anchor: "let (mut buffer, stats) = TrackedAudioBuffer::new(cursor, 1024);"
+    chain: []
+    rules:
+      - 當底層網路緩衝區不足時應能安全回報等待，防止解碼器讀到零字節引發提早 EOF 誤判
+

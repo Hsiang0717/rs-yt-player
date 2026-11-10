@@ -1,0 +1,85 @@
+# External Cognitive Layer (ECL) — High-Signal Causal & Invariant Ledger
+# Contains ONLY non-obvious cross-module couplings, async race guards, and platform pitfalls.
+
+clusters:
+  - cluster_id: seek_scrub_polling_exclusivity
+    summary: Synchronizes user timeline slider dragging with the 100ms background polling timer
+    entrypoint:
+      id: src/ui_callbacks.rs#L73-80
+      symbol: PendingSeekState
+    chain:
+      - node: src/app_timer.rs#L28-558
+        symbol: start_playback_polling_timer
+        effect: Reads PendingSeekState every 100ms tick; skips slider position overwrite while user_scrub is active
+    rules:
+      - 用戶拖曳進度條（user_scrub）期間，必須嚴格阻斷 100ms Polling Timer 覆寫 UI 滑桿位置以防跳針
+      - 釋放滑桿（user_seek）後才更新 target_secs 並非同步通知解碼執行緒
+
+  - cluster_id: polling_timer_lifecycle_guards
+    summary: Central 100ms Slint timer managing progress, position persistence, sleep/resume, and auto-advance
+    entrypoint:
+      id: src/app_timer.rs#L28-558
+      symbol: start_playback_polling_timer
+    chain:
+      - node: src/win32_window.rs#L17-28
+        symbol: is_window_visible
+        effect: Suppresses high-frequency UI model updates when window is hidden in system tray
+    rules:
+      - 視窗最小化至系統匣時必須抑制非必要 UI 刷新以降低背景 CPU 開銷
+      - 播放進度寫入磁碟必須進行時間節流（throttle），嚴禁每個 100ms tick 寫入硬碟
+      - 偵測到系統休眠（system_suspended）時必須自動暫停播放以防時間軸飄移
+
+  - cluster_id: disk_and_stream_cache_bounds
+    summary: Enforces memory and disk capacity bounds across HTTP stream ByteCache and local library LRU storage
+    entrypoint:
+      id: src/stream_reader/cache.rs#L3-10
+      symbol: ByteCache
+    chain:
+      - node: src/library.rs#L422-531
+        symbol: prune_cache_async
+        effect: Enforces 3GB / 200-track disk audio cache and 300-cover LRU limits in background thread
+      - node: src/library.rs#L212-230
+        symbol: add_favorites
+        effect: Batch deduplicates and prepends favorite tracks atomically to library.json
+    rules:
+      - 記憶體串流快取（MAX_BYTE_CACHE_BYTES = 32MB）與預讀緩衝（2MB）必須受上限約束，防止長時間播放 OOM
+      - 磁碟 LRU 淘汰（3GB / 200 首音訊、300 張封面）執行時，標記為「喜愛/收藏（Favorites）」的曲目與封面必須永久豁免
+      - 批次收藏（add_favorites）背景快取音訊時必須採單一非同步循序下載，嚴禁並發多個 yt-dlp 行程以防 429 速率限制與 CPU 風暴
+      - 批次變更收藏必須原子化寫入磁碟，並於同事件循環同步更新所有分頁（favorite_items、queue_items、search_results）與播放器愛心狀態以防 UI 視圖脫節
+
+  - cluster_id: http_stream_expiry_and_range_cancel
+    summary: Handles YouTube stream URL expiration detection and async HTTP Range seek cancellation
+    entrypoint:
+      id: src/stream_reader/http.rs#L13-26
+      symbol: is_url_expired
+    chain:
+      - node: src/stream_reader/range_source.rs#L52-56
+        symbol: AsyncRangeMediaSource
+        effect: Cancels in-flight HTTP range requests immediately upon new seek
+    rules:
+      - 判定 URL 到期必須加上 60 秒前置安全緩衝；遭遇 HTTP 403/410 時立即觸發協調器刷新串流地址
+      - 快進時必須立即取消前一個未完成的非同步 Range 請求以釋放連線
+
+  - cluster_id: win32_smtc_and_tray_com_safety
+    summary: Windows System Media Transport Controls (SMTC) HWND binding and System Tray COM initialization
+    entrypoint:
+      id: src/smtc.rs#L11-18
+      symbol: SmtcManager
+    chain:
+      - node: src/tray.rs#L5-15
+        symbol: SystemTray
+        effect: Initializes Win32 tray icon and menu event loop
+    rules:
+      - 主視窗就緒前必須先建立 dummy HWND 承載 SMTC，Slint 視窗就緒後呼叫 rebind_hwnd 重新綁定
+      - 必須快取 last_metadata 與 last_playback 快照，避免重複呼叫 WinRT/Shell_NotifyIcon 引發 COM 抖動
+      - 初始化系統匣時必須以 COINIT_APARTMENTTHREADED 呼叫 CoInitializeEx
+
+  - cluster_id: ytdlp_subprocess_isolation
+    summary: Manages yt-dlp child processes for metadata extraction and stream URL resolution
+    entrypoint:
+      id: src/extractor.rs#L124-126
+      symbol: Extractor
+    chain: []
+    rules:
+      - 所有 yt-dlp 子行程必須設定 CREATE_NO_WINDOW 與 kill_on_drop(true)，防止彈出黑窗或殘留孤兒行程
+      - 遭遇 YouTube 429/403 時必須執行指數退避重試（Exponential Backoff）

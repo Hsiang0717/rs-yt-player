@@ -1,0 +1,56 @@
+domain: extractor
+description: Business domain causal clusters for extractor
+
+clusters:
+  - cluster_id: flow_extractor_shared_http_client
+    summary: Provides a globally shared static reqwest::Client configured with standard browser headers and timeout settings for thumbnail fetching and stream checks
+    entrypoint:
+      id: src/extractor.rs#L13-23
+      symbol: shared_http_client
+      anchor: "pub fn shared_http_client() -> &'static reqwest::Client {"
+    chain: []
+    rules:
+      - 禁止為每次 HTTP 請求重新建立 reqwest::Client，必須共用靜態實例以維持連線池（Connection Pool）
+
+  - cluster_id: flow_extractor_audiometadata
+    summary: Data transfer object storing comprehensive YouTube video metadata (id, title, uploader, duration, stream_url, thumbnail, loudness_db, start_offset)
+    entrypoint:
+      id: src/extractor.rs#L26-46
+      symbol: AudioMetadata
+      anchor: "pub struct AudioMetadata {"
+    chain: []
+    rules:
+      - 解析 yt-dlp JSON 輸出時必須具備容錯能力，uploader 缺省時自動降級使用 channel 欄位
+      - 音訊響度（loudness_db）必須在元數據中解析以提供重播增益（ReplayGain）正規化
+
+  - cluster_id: flow_extractor_playlistitem
+    summary: Lightweight representation of an individual item within an extracted YouTube playlist containing video id, title, and duration
+    entrypoint:
+      id: src/extractor.rs#L43-63
+      symbol: PlaylistItem
+      anchor: "pub struct PlaylistItem {"
+    chain: []
+    rules:
+      - 播放清單抽取時僅抓取扁平清單，不應為所有項目同時抽取完整串流 URL 避免 YouTube API 限速
+
+  - cluster_id: flow_extractor_searchresult
+    summary: Search candidate representation containing YouTube query matches with title, artist, duration, video ID, and thumbnail
+    entrypoint:
+      id: src/extractor.rs#L52-72
+      symbol: SearchResult
+      anchor: "pub struct SearchResult {"
+    chain: []
+    rules:
+      - 搜尋候選項必須在搜尋階段完成關鍵字轉義與時長解析
+
+  - cluster_id: flow_extractor_extractor
+    summary: Main yt-dlp process manager and metadata extractor with automated binary discovery, self-update capability, and exponential backoff retry
+    entrypoint:
+      id: src/extractor.rs#L124-100
+      symbol: Extractor
+      anchor: "pub struct Extractor {"
+    chain: []
+    rules:
+      - 所有叫用 yt-dlp 的子行程必須配置 CREATE_NO_WINDOW 與 kill_on_drop(true)，保證無控制台黑窗且任務中止時即刻終止行程
+      - 串流提取必須實作指數退避重試（Exponential Backoff）以因應 YouTube 暫態 429 / 403 網路抖動
+

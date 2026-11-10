@@ -1,0 +1,184 @@
+domain: win32_window
+description: Business domain causal clusters for win32_window
+
+clusters:
+  - cluster_id: flow_win32_window_is_window_visible
+    summary: Checks whether the main Win32 application window is currently visible or minimized to system tray
+    entrypoint:
+      id: src/win32_window.rs#L26-28
+      symbol: is_window_visible
+      anchor: "pub fn is_window_visible() -> bool {"
+    chain: []
+    rules:
+      - 後台隱藏於系統匣時返回 false，供輪詢定時器抑制高負載 UI 刷新
+
+  - cluster_id: flow_win32_window_take_system_resumed
+    summary: Atomic one-shot retrieval and reset of the system sleep resume event flag
+    entrypoint:
+      id: src/win32_window.rs#L30-32
+      symbol: take_system_resumed
+      anchor: "pub fn take_system_resumed() -> bool {"
+    chain: []
+    rules:
+      - 讀取後必須原子歸零，確保每個系統喚醒事件僅被處理一次
+
+  - cluster_id: flow_win32_window_take_system_suspended
+    summary: Atomic one-shot retrieval and reset of the system sleep suspension event flag
+    entrypoint:
+      id: src/win32_window.rs#L34-36
+      symbol: take_system_suspended
+      anchor: "pub fn take_system_suspended() -> bool {"
+    chain: []
+    rules:
+      - 讀取後必須原子歸零，觸發自動暫停以保護音訊進度與解碼器狀態
+
+  - cluster_id: flow_win32_window_take_window_moved_pos
+    summary: Atomic retrieval and reset of pending window coordinate changes moved by the user
+    entrypoint:
+      id: src/win32_window.rs#L38-40
+      symbol: take_window_moved_pos
+      anchor: "pub fn take_window_moved_pos() -> Option<(i32, i32)> {"
+    chain: []
+    rules:
+      - WM_MOVE 觸發後讀取最新 (x, y)，供定時器寫入本地 LibraryStore
+
+  - cluster_id: flow_win32_window_trim_process_working_set
+    summary: Calls SetProcessWorkingSetSize(-1, -1) to release inactive memory pages back to Windows OS upon tray minimization
+    entrypoint:
+      id: src/win32_window.rs#L130-135
+      symbol: trim_process_working_set
+      anchor: "pub fn trim_process_working_set() {"
+    chain: []
+    rules:
+      - 僅在視窗隱藏至系統匣時調用，顯著降低背景駐留記憶體開銷
+
+  - cluster_id: flow_win32_window_set_taskbar_button
+    summary: Toggles taskbar icon visibility using ITaskbarList::DeleteTab / AddTab when minimizing to tray
+    entrypoint:
+      id: src/win32_window.rs#L137-156
+      symbol: set_taskbar_button
+      anchor: "pub fn set_taskbar_button(hwnd: HWND, visible: bool) {"
+    chain: []
+    rules:
+      - 最小化至系統匣時必須從工作列完全移除分頁按鈕
+
+  - cluster_id: flow_win32_window_set_always_on_top
+    summary: Toggles window topmost pinning state using Win32 SetWindowPos(HWND_TOPMOST / HWND_NOTOPMOST)
+    entrypoint:
+      id: src/win32_window.rs#L158-175
+      symbol: set_always_on_top
+      anchor: "pub fn set_always_on_top(hwnd: HWND, topmost: bool) {"
+    chain: []
+    rules:
+      - 切換時使用 SWP_NOMOVE | SWP_NOSIZE 旗標保留既有座標與尺寸
+
+  - cluster_id: flow_win32_window_restore_window_position
+    summary: Validates and positions window on screen ensuring coordinates stay within visible monitor bounds
+    entrypoint:
+      id: src/win32_window.rs#L177-201
+      symbol: restore_window_position
+      anchor: "pub fn restore_window_position(hwnd: HWND, x: i32, y: i32) {"
+    chain: []
+    rules:
+      - 多螢幕斷開時若舊座標超出虛擬螢幕邊界，必須自動校正回主螢幕可見區域
+
+  - cluster_id: flow_win32_window_start_window_drag
+    summary: Triggers native Win32 window dragging on frameless custom Morandi titlebar using WM_NCLBUTTONDOWN and HTCAPTION
+    entrypoint:
+      id: src/win32_window.rs#L203-211
+      symbol: start_window_drag
+      anchor: "pub fn start_window_drag(hwnd: HWND) {"
+    chain: []
+    rules:
+      - 呼叫 SendMessage 前必須先釋放滑鼠捕獲（ReleaseCapture）
+
+  - cluster_id: flow_win32_window_minimize_to_tray
+    summary: Hides main window removes taskbar entry and trims working set memory when user minimizes or closes
+    entrypoint:
+      id: src/win32_window.rs#L213-219
+      symbol: minimize_to_tray
+      anchor: "pub fn minimize_to_tray(hwnd: HWND) {"
+    chain: []
+    rules:
+      - 必須依序執行 ShowWindow(SW_HIDE) 與 set_taskbar_button(false)
+
+  - cluster_id: flow_win32_window_restore_from_tray
+    summary: Unhides main window restores taskbar button and brings window to foreground when clicked from tray icon
+    entrypoint:
+      id: src/win32_window.rs#L221-229
+      symbol: restore_from_tray
+      anchor: "pub fn restore_from_tray(hwnd: HWND) {"
+    chain: []
+    rules:
+      - 必須依序呼叫 ShowWindow(SW_SHOW)、SetForegroundWindow 與 SetFocus
+
+  - cluster_id: flow_win32_window_singleinstanceguard
+    summary: RAII handle holding the Windows named Mutex ensuring only a single instance of the player runs at any time
+    entrypoint:
+      id: src/win32_window.rs#L231-100
+      symbol: SingleInstanceGuard
+      anchor: "pub struct SingleInstanceGuard {"
+    chain: []
+    rules:
+      - Guard Drop 時必須安全關閉 Mutex 句柄
+
+  - cluster_id: flow_win32_window_wake_existing_instance
+    summary: Locates and activates an already-running instance window when a duplicate player process starts
+    entrypoint:
+      id: src/win32_window.rs#L244-251
+      symbol: wake_existing_instance
+      anchor: "pub fn wake_existing_instance() {"
+    chain: []
+    rules:
+      - 尋獲已存在視窗後發送消息喚醒並置頂視窗，隨後當前行程自我終止
+
+  - cluster_id: flow_win32_window_acquire_single_instance
+    summary: Attempts to create a unique Win32 named Mutex (Local\\YouTubeAudioPlayerSingleInstanceMutex)
+    entrypoint:
+      id: src/win32_window.rs#L253-268
+      symbol: acquire_single_instance
+      anchor: "pub fn acquire_single_instance() -> Option<SingleInstanceGuard> {"
+    chain: []
+    rules:
+      - 若 CreateMutexW 返回 ERROR_ALREADY_EXISTS 則回傳 None 並主動喚醒前身視窗
+
+  - cluster_id: flow_win32_window_find_current_process_window
+    summary: Enumerates desktop windows via EnumWindows to match HWND belonging to the current process ID
+    entrypoint:
+      id: src/win32_window.rs#L270-326
+      symbol: find_current_process_window
+      anchor: "pub fn find_current_process_window() -> Option<HWND> {"
+    chain: []
+    rules:
+      - 需過濾排除隱藏或非頂層子視窗
+
+  - cluster_id: flow_win32_window_try_find_and_hook
+    summary: Locates the Slint window HWND and installs a custom Win32 WndProc hook for frameless Mica/Acrylic styling power events and device notifications
+    entrypoint:
+      id: src/win32_window.rs#L352-366
+      symbol: try_find_and_hook
+      anchor: "pub fn try_find_and_hook() -> Option<HWND> {"
+    chain: []
+    rules:
+      - Subclass 替換 WndProc 時必須在最後將未處理訊息傳遞給 CallWindowProcW
+
+  - cluster_id: flow_win32_window_check_default_audio_device_changed
+    summary: Polls IMMDeviceEnumerator default audio endpoint to detect headphone plug/unplug or Bluetooth audio route changes
+    entrypoint:
+      id: src/win32_window.rs#L369-414
+      symbol: check_default_audio_device_changed
+      anchor: "pub fn check_default_audio_device_changed() -> bool {"
+    chain: []
+    rules:
+      - 檢測到音訊設備變更時回傳 true，通知上層重建 Rodio 音訊輸出流
+
+  - cluster_id: flow_win32_window_setup_windows_app_identity
+    summary: Registers Windows AppUserModelID for explicit Windows taskbar grouping and SMTC thumbnail binding
+    entrypoint:
+      id: src/win32_window.rs#L418-514
+      symbol: setup_windows_app_identity
+      anchor: "pub fn setup_windows_app_identity() {"
+    chain: []
+    rules:
+      - 必須在主視窗建立前呼叫 SetCurrentProcessExplicitAppUserModelID
+

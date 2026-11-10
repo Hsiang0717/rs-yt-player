@@ -1,0 +1,44 @@
+version: 1.0
+domains:
+  - id: app_timer
+    file: app_timer.yaml
+    scope: Domain clusters for app_timer (total 1 flows)
+  - id: buffer
+    file: buffer.yaml
+    scope: Domain clusters for buffer (total 2 flows)
+  - id: cli
+    file: cli.yaml
+    scope: Domain clusters for cli (total 1 flows)
+  - id: extractor
+    file: extractor.yaml
+    scope: Domain clusters for extractor (total 5 flows)
+  - id: library
+    file: library.yaml
+    scope: Domain clusters for library (total 3 flows)
+  - id: playback_coordinator
+    file: playback_coordinator.yaml
+    scope: Domain clusters for playback_coordinator (total 8 flows)
+  - id: player
+    file: player.yaml
+    scope: Domain clusters for player (total 2 flows)
+  - id: queue
+    file: queue.yaml
+    scope: Domain clusters for queue (total 4 flows)
+  - id: smtc
+    file: smtc.yaml
+    scope: Domain clusters for smtc (total 1 flows)
+  - id: tray
+    file: tray.yaml
+    scope: Domain clusters for tray (total 1 flows)
+  - id: ui_callbacks
+    file: ui_callbacks.yaml
+    scope: Domain clusters for ui_callbacks (total 9 flows)
+  - id: ui_models
+    file: ui_models.yaml
+    scope: Domain clusters for ui_models (total 14 flows)
+  - id: win32_window
+    file: win32_window.yaml
+    scope: Domain clusters for win32_window (total 18 flows)
+  - id: stream_reader
+    file: stream_reader.yaml
+    scope: Domain clusters for stream_reader (total 7 flows)

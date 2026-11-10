@@ -1,0 +1,144 @@
+domain: ui_models
+description: Business domain causal clusters for ui_models
+
+clusters:
+  - cluster_id: flow_ui_models_load_cached_cover_image
+    summary: Loads a locally cached track thumbnail image from the library directory and constructs a slint::Image instance
+    entrypoint:
+      id: src/ui_models.rs#L15-36
+      symbol: load_cached_cover_image
+      anchor: "pub fn load_cached_cover_image(library: &LibraryStore, id: &str) -> Option<slint::Image> {"
+    chain: []
+    rules:
+      - 圖檔遺失或毀損時回傳 None，觸發 UI 呈現預設莫蘭迪漸層佔位圖
+
+  - cluster_id: flow_ui_models_sanitize_text
+    summary: Cleans untrusted strings from YouTube metadata (stripping null bytes and control characters) for safe Slint rendering
+    entrypoint:
+      id: src/ui_models.rs#L38-42
+      symbol: sanitize_text
+      anchor: "pub fn sanitize_text(raw: &str) -> String {"
+    chain: []
+    rules:
+      - 必須移除不可列印控制字元，防止 Slint 文字渲染器損毀或當機
+
+  - cluster_id: flow_ui_models_record_from_search
+    summary: Converts a SearchResult entity into a persistent TrackRecord
+    entrypoint:
+      id: src/ui_models.rs#L44-52
+      symbol: record_from_search
+      anchor: "pub fn record_from_search(result: SearchResult) -> TrackRecord {"
+    chain: []
+    rules:
+      - 轉換時保留標題、歌手、時長與縮圖地址
+
+  - cluster_id: flow_ui_models_record_from_audio
+    summary: Converts extracted AudioMetadata into a persistent TrackRecord
+    entrypoint:
+      id: src/ui_models.rs#L54-67
+      symbol: record_from_audio
+      anchor: "pub fn record_from_audio(meta: &AudioMetadata) -> TrackRecord {"
+    chain: []
+    rules:
+      - 歌手缺省時自動回退至 channel 或 Unknown Artist
+
+  - cluster_id: flow_ui_models_requested_video_id
+    summary: Extracts the 11-character YouTube video ID from query strings or full URLs
+    entrypoint:
+      id: src/ui_models.rs#L69-76
+      symbol: requested_video_id
+      anchor: "pub fn requested_video_id(query: &str) -> Option<&str> {"
+    chain: []
+    rules:
+      - 支援 youtu.be、youtube.com/watch?v= 及純 11 字元 ID 提取
+
+  - cluster_id: flow_ui_models_query_video_id
+    summary: Generates a deterministic cache key or video ID for a query string
+    entrypoint:
+      id: src/ui_models.rs#L78-82
+      symbol: query_video_id
+      anchor: "pub fn query_video_id(query: &str) -> String {"
+    chain: []
+    rules:
+      - 若非有效 URL 則將整個字串生成穩定唯一雜湊作為虛擬 ID
+
+  - cluster_id: flow_ui_models_track_row_model
+    summary: Constructs a Slint TrackRow UI struct from track attributes with favorite and active state indicators
+    entrypoint:
+      id: src/ui_models.rs#L84-120
+      symbol: track_row_model
+      anchor: "pub fn track_row_model("
+    chain: []
+    rules:
+      - 時長字串與狀態標籤必須在轉換期先完成格式化
+
+  - cluster_id: flow_ui_models_records_model
+    summary: Converts a slice of TrackRecords into a Slint ModelRc<TrackRow> collection
+    entrypoint:
+      id: src/ui_models.rs#L122-138
+      symbol: records_model
+      anchor: "pub fn records_model("
+    chain: []
+    rules:
+      - 必須轉換為 VecModelRc 以符合 Slint UI 虛擬滾動列表契約
+
+  - cluster_id: flow_ui_models_queue_items_model
+    summary: Converts the current PlayQueue items into a Slint ModelRc<TrackRow> for the queue drawer
+    entrypoint:
+      id: src/ui_models.rs#L140-171
+      symbol: queue_items_model
+      anchor: "pub fn queue_items_model(queue: &PlayQueue, library: &LibraryStore) -> slint::ModelRc<TrackRow> {"
+    chain: []
+    rules:
+      - 每項曲目必須比對 LibraryStore 取得正確的收藏狀態（is_favorite）
+
+  - cluster_id: flow_ui_models_current_queue_index
+    summary: Retrieves the currently active playing track index as an i32 for Slint list selection
+    entrypoint:
+      id: src/ui_models.rs#L173-179
+      symbol: current_queue_index
+      anchor: "pub fn current_queue_index(queue: &PlayQueue) -> i32 {"
+    chain: []
+    rules:
+      - 無選中項時回傳 -1
+
+  - cluster_id: flow_ui_models_sync_queue_to_ui
+    summary: Synchronizes the current PlayQueue state and active selection index to the Slint AppWindow
+    entrypoint:
+      id: src/ui_models.rs#L181-184
+      symbol: sync_queue_to_ui
+      anchor: "pub fn sync_queue_to_ui(ui: &AppWindow, queue: &PlayQueue, library: &LibraryStore) {"
+    chain: []
+    rules:
+      - 更新 modelRc 後必須同步呼叫 ui.set_current_queue_index
+
+  - cluster_id: flow_ui_models_apply_queue_expanded
+    summary: Updates the Slint queue side-drawer visibility and triggers layout width transitions
+    entrypoint:
+      id: src/ui_models.rs#L186-197
+      symbol: apply_queue_expanded
+      anchor: "pub fn apply_queue_expanded(ui: &AppWindow, expanded: bool) {"
+    chain: []
+    rules:
+      - 更新 queue_expanded 屬性以驅動 Slint 側邊欄滑出動畫
+
+  - cluster_id: flow_ui_models_cache_track_cover
+    summary: Downloads a thumbnail image from a remote URL and persists it to the local covers directory
+    entrypoint:
+      id: src/ui_models.rs#L199-217
+      symbol: cache_track_cover
+      anchor: "pub async fn cache_track_cover("
+    chain: []
+    rules:
+      - 若本地已存在有效快取圖片則跳過下載，節省網路帶寬
+
+  - cluster_id: flow_ui_models_is_url
+    summary: Heuristic check whether a search query string is an HTTP/HTTPS URL
+    entrypoint:
+      id: src/ui_models.rs#L219-221
+      symbol: is_url
+      anchor: "pub fn is_url(query: &str) -> bool {"
+    chain: []
+    rules:
+      - 嚴格檢查 http:// 或 https:// 前綴
+
